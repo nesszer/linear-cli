@@ -2294,12 +2294,15 @@ mod tests {
 
     #[test]
     fn test_format_history_priority_change() {
+        // `format_history_entry` calls `sanitize_terminal_text` on its
+        // output (see end of the function), so it never returns ANSI
+        // escapes — compare against a plain literal. (Coloring of the
+        // priority label itself is covered by priority::tests.)
         let entry = serde_json::json!({
             "fromPriority": 3.0,
             "toPriority": 1.0
         });
-        let expected = format!("Priority: Normal → {}", "Urgent".red());
-        assert_eq!(format_history_entry(&entry), expected);
+        assert_eq!(format_history_entry(&entry), "Priority: Normal → Urgent");
     }
 
     #[test]
