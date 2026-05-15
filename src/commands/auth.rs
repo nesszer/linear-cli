@@ -1,3 +1,5 @@
+#[cfg(feature = "secure-storage")]
+use anyhow::Context;
 use anyhow::Result;
 use clap::Subcommand;
 use dialoguer::{Confirm, Password};
