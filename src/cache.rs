@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -131,7 +132,15 @@ impl Cache {
         })
     }
 
-    /// Get the cache directory path, scoped by workspace/profile
+    /// Get the cache directory path, scoped by both profile and auth identity.
+    ///
+    /// The path is `…/linear-cli/cache/<profile>/<identity>` where `<identity>`
+    /// is a short hash of the effective API key (see [`cache_identity_from_key`]).
+    /// Scoping by identity — not just the profile name — prevents two workspaces
+    /// that share a profile (e.g. bare `LINEAR_API_KEY` swaps on `default`) from
+    /// reading each other's cached data. When no API key can be resolved
+    /// (auth-free commands, unconfigured state) the identity segment is dropped
+    /// and the legacy `…/cache/<profile>` layout is used.
     pub(crate) fn cache_dir() -> Result<PathBuf> {
         static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -140,15 +149,24 @@ impl Cache {
         }
 
         let profile = config::current_profile().unwrap_or_else(|_| "default".to_string());
-        let config_dir = dirs::config_dir()
-            .context("Could not find config directory")?
-            .join("linear-cli")
-            .join("cache")
-            .join(profile);
+        let base = dirs::config_dir().context("Could not find config directory")?;
+
+        // Identity is fixed for a process invocation, so resolving + memoizing
+        // it here is correct. A failure to resolve the key (no auth) falls back
+        // to the legacy profile-only layout rather than erroring.
+        // INVARIANT: get_api_key() must be stable for the process. If a future
+        // code path makes a key appear mid-process (e.g. an interactive login)
+        // and then reads the cache, the memoized legacy path would defeat
+        // identity scoping — resolve/clear the cache after such a transition.
+        let identity = config::get_api_key()
+            .ok()
+            .map(|key| cache_identity_from_key(&key));
+
+        let dir = cache_dir_for(&base, &profile, identity.as_deref());
 
         // Store for future calls (ignore if another thread beat us)
-        let _ = CACHE_DIR.set(config_dir.clone());
-        Ok(config_dir)
+        let _ = CACHE_DIR.set(dir.clone());
+        Ok(dir)
     }
 
     /// Get the path for a specific cache type
@@ -362,6 +380,28 @@ impl Cache {
     }
 }
 
+/// Compute a short, stable cache identity from an API key.
+///
+/// Returns the first 8 hex characters of `sha256(api_key)`. The raw key never
+/// leaves this function — only the hash is returned — so no key material is ever
+/// written to a cache path or file.
+fn cache_identity_from_key(api_key: &str) -> String {
+    let digest = Sha256::digest(api_key.as_bytes());
+    digest[..4].iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Pure path builder for the cache directory (no I/O, no globals).
+///
+/// `Some(identity)` ⇒ `base/linear-cli/cache/<profile>/<identity>`.
+/// `None` ⇒ `base/linear-cli/cache/<profile>` (legacy, profile-only layout).
+fn cache_dir_for(base: &Path, profile: &str, identity: Option<&str>) -> PathBuf {
+    let mut path = base.join("linear-cli").join("cache").join(profile);
+    if let Some(id) = identity {
+        path = path.join(id);
+    }
+    path
+}
+
 pub fn cache_dir_path() -> Result<PathBuf> {
     Cache::cache_dir()
 }
@@ -532,5 +572,77 @@ mod tests {
             item_count: None,
         };
         assert_eq!(status_mb.size_display(), "1.0 MB");
+    }
+
+    #[test]
+    fn test_cache_identity_is_8_lowercase_hex() {
+        let id = cache_identity_from_key("lin_api_example_key_123");
+        assert_eq!(id.len(), 8);
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn test_cache_identity_distinct_keys_distinct_ids() {
+        assert_ne!(
+            cache_identity_from_key("lin_api_workspace_a"),
+            cache_identity_from_key("lin_api_workspace_b")
+        );
+    }
+
+    #[test]
+    fn test_cache_identity_is_deterministic() {
+        assert_eq!(
+            cache_identity_from_key("lin_api_same_key"),
+            cache_identity_from_key("lin_api_same_key")
+        );
+    }
+
+    #[test]
+    fn test_cache_dir_for_distinct_identities_distinct_paths() {
+        let base = Path::new("/tmp/lc-cache-test-base");
+        assert_ne!(
+            cache_dir_for(base, "default", Some("aaaa1111")),
+            cache_dir_for(base, "default", Some("bbbb2222"))
+        );
+    }
+
+    #[test]
+    fn test_cache_dir_for_same_inputs_same_path() {
+        let base = Path::new("/tmp/lc-cache-test-base");
+        assert_eq!(
+            cache_dir_for(base, "default", Some("aaaa1111")),
+            cache_dir_for(base, "default", Some("aaaa1111"))
+        );
+    }
+
+    #[test]
+    fn test_cache_dir_for_none_is_legacy_layout() {
+        let base = Path::new("/tmp/lc-cache-test-base");
+        let legacy = cache_dir_for(base, "default", None);
+        assert!(legacy.ends_with("cache/default"), "got {:?}", legacy);
+
+        let scoped = cache_dir_for(base, "default", Some("aaaa1111"));
+        assert!(
+            scoped.ends_with("cache/default/aaaa1111"),
+            "got {:?}",
+            scoped
+        );
+    }
+
+    #[test]
+    fn test_cache_dir_for_path_contains_only_hash_never_raw_key() {
+        let key = "lin_api_supersecret_value_should_never_appear";
+        let id = cache_identity_from_key(key);
+        let base = Path::new("/tmp/lc-cache-test-base");
+        let path = cache_dir_for(base, "default", Some(&id));
+        let path_str = path.to_string_lossy();
+        assert!(
+            !path_str.contains(key),
+            "raw key leaked into cache path: {}",
+            path_str
+        );
+        assert!(path_str.contains(&id));
     }
 }
