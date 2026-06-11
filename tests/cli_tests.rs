@@ -2142,3 +2142,70 @@ fn test_yes_flag_works_with_subcommand() {
         "--yes flag should not interfere with subcommand parsing"
     );
 }
+
+// ---- Exit-code / JSON-error contract (agent ergonomics) ----
+// Offline checks via the `bulk label` empty-issues path (a failure reached
+// before any network/config access). Credential-dependent paths are covered by
+// the unit tests in src/commands/* and by live E2E.
+
+/// Run the CLI with an isolated, empty config home and no ambient credentials.
+/// Each call gets a unique HOME so parallel tests never share state.
+fn run_cli_isolated(args: &[&str]) -> (i32, String, String) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp =
+        std::env::temp_dir().join(format!("linear-cli-isolated-{}-{}", std::process::id(), n));
+    let _ = std::fs::create_dir_all(&tmp);
+    let output = Command::new(env!("CARGO_BIN_EXE_linear-cli"))
+        .args(args)
+        .env("HOME", &tmp)
+        .env("XDG_CONFIG_HOME", &tmp)
+        .env_remove("LINEAR_API_KEY")
+        .env_remove("LINEAR_CLI_PROFILE")
+        .output()
+        .expect("Failed to execute command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let code = output.status.code().unwrap_or(-1);
+
+    (code, stdout, stderr)
+}
+
+#[test]
+fn test_failing_command_exits_nonzero() {
+    // `bulk label` with no issues is a logical failure: must not exit 0.
+    let (code, _stdout, stderr) = run_cli_isolated(&["bulk", "label", "Bug"]);
+    assert_ne!(
+        code, 0,
+        "a failing command must exit non-zero; stderr={stderr}"
+    );
+    assert!(
+        (1..=4).contains(&code),
+        "exit code should be a documented error code (1-4), got {code}"
+    );
+}
+
+#[test]
+fn test_json_error_body_emitted_on_stderr_not_stdout() {
+    // stdout is empty on this path; the results-vs-error stream split is
+    // unit-tested in src/commands/{bulk,issues,comments}.rs.
+    let (code, stdout, stderr) = run_cli_isolated(&["bulk", "label", "Bug", "--output", "json"]);
+    assert_ne!(code, 0, "failing command must exit non-zero");
+    assert!(
+        stderr.contains("\"error\":true"),
+        "stderr should carry the JSON error body, got: {stderr}"
+    );
+    assert!(
+        !stdout.contains("\"error\":true"),
+        "stdout must not carry a second JSON error body, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_successful_command_exits_zero() {
+    let (code, stdout, _stderr) = run_cli_isolated(&["--version"]);
+    assert_eq!(code, 0, "a successful command must exit 0");
+    assert!(!stdout.is_empty());
+}

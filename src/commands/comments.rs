@@ -7,6 +7,7 @@ use tabled::{Table, Tabled};
 
 use crate::api::LinearClient;
 use crate::display_options;
+use crate::error::{CliError, ErrorKind};
 use crate::input::read_ids_from_stdin;
 use crate::output::{
     ensure_non_empty, filter_values, print_json, print_json_owned, sort_values, OutputOptions,
@@ -109,7 +110,10 @@ async fn list_comments(issue_ids: &[String], output: &OutputOptions) -> Result<(
                             Err(e) => Err((id, e)),
                         }
                     }
-                    Ok(_) => Err((id, anyhow::anyhow!("Issue not found"))),
+                    Ok(_) => Err((
+                        id.clone(),
+                        CliError::not_found(format!("Issue not found: {id}")).into(),
+                    )),
                     Err(e) => Err((id, e)),
                 }
             }
@@ -119,12 +123,28 @@ async fn list_comments(issue_ids: &[String], output: &OutputOptions) -> Result<(
         .await;
 
     let mut issues = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    // Real fetch errors keep their kind; missing issues map to NotFound.
+    let mut first_error: Option<anyhow::Error> = None;
     for result in fetched {
         match result {
             Ok((_id, issue)) => issues.push(issue),
-            Err((id, _e)) => {
+            Err((id, e)) => {
+                let is_missing = e
+                    .downcast_ref::<CliError>()
+                    .map(|c| c.kind == ErrorKind::NotFound)
+                    .unwrap_or(false);
                 if !output.is_json() && !output.has_template() {
-                    eprintln!("{} Issue not found: {}", "!".yellow(), id);
+                    if is_missing {
+                        eprintln!("{} Issue not found: {}", "!".yellow(), id);
+                    } else {
+                        eprintln!("{} Error fetching {}: {}", "!".red(), id, e);
+                    }
+                }
+                if is_missing {
+                    missing.push(id);
+                } else if first_error.is_none() {
+                    first_error = Some(e);
                 }
             }
         }
@@ -137,7 +157,7 @@ async fn list_comments(issue_ids: &[String], output: &OutputOptions) -> Result<(
         } else {
             print_json_owned(serde_json::json!(issues), output)?;
         }
-        return Ok(());
+        return comments_status(first_error, &missing);
     }
 
     for (idx, issue) in issues.iter().enumerate() {
@@ -202,7 +222,20 @@ async fn list_comments(issue_ids: &[String], output: &OutputOptions) -> Result<(
         println!("\n{} comments", comments.len());
     }
 
-    Ok(())
+    comments_status(first_error, &missing)
+}
+
+/// Aggregate exit status: a real fetch error (passed through unchanged) wins so
+/// its kind survives; otherwise missing issues map to NotFound.
+fn comments_status(first_error: Option<anyhow::Error>, missing: &[String]) -> Result<()> {
+    if let Some(e) = first_error {
+        return Err(e);
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(CliError::not_found(format!("Issue(s) not found: {}", missing.join(", "))).into())
+    }
 }
 
 async fn fetch_issue_meta(client: &LinearClient, issue_id: &str) -> Result<serde_json::Value> {
@@ -334,6 +367,34 @@ mod tests {
             safe_terminal_value("bad\u{1b}]52;c;ZXZpbA==\u{7}title"),
             "badtitle"
         );
+    }
+
+    #[test]
+    fn comments_status_ok_when_nothing_failed() {
+        assert!(comments_status(None, &[]).is_ok());
+    }
+
+    #[test]
+    fn comments_status_notfound_when_only_missing() {
+        let err = comments_status(None, &["LIN-9".to_string()]).unwrap_err();
+        assert_eq!(err.downcast_ref::<CliError>().expect("CliError").code(), 2);
+    }
+
+    #[test]
+    fn comments_status_preserves_real_error_over_missing() {
+        // A real fetch error keeps its kind (rate-limited => 4), not NotFound(2).
+        let err = comments_status(
+            Some(
+                CliError::rate_limited("429")
+                    .with_retry_after(Some(5))
+                    .into(),
+            ),
+            &["LIN-9".to_string()],
+        )
+        .unwrap_err();
+        let cli = err.downcast_ref::<CliError>().expect("CliError");
+        assert_eq!(cli.code(), 4);
+        assert_eq!(cli.retry_after, Some(5));
     }
 }
 

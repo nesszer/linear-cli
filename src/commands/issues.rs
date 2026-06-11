@@ -11,6 +11,7 @@ use crate::api::{
 };
 use crate::cache::CacheOptions;
 use crate::display_options;
+use crate::error::{self, CliError};
 use crate::input::read_ids_from_stdin;
 use crate::output::{
     ensure_non_empty, filter_values, print_json, print_json_owned, sort_values, OutputOptions,
@@ -804,6 +805,10 @@ async fn get_issues(
         .collect()
         .await;
 
+    // Any missing/errored issue exits non-zero; the issues found are still
+    // printed. Computed before printing so `results` can be consumed below.
+    let status = multi_get_status(&results);
+
     // JSON output: array of issues
     if output.is_json() || output.has_template() {
         let issues: Vec<_> = results
@@ -820,7 +825,7 @@ async fn get_issues(
             })
             .collect();
         print_json_owned(serde_json::json!(issues), output)?;
-        return Ok(());
+        return status;
     }
 
     // Table output
@@ -845,7 +850,34 @@ async fn get_issues(
         }
     }
 
-    Ok(())
+    status
+}
+
+/// Aggregate exit status for a multi-issue fetch. A real fetch error takes
+/// priority and keeps its kind (e.g. RateLimited stays retryable); only a `null`
+/// issue node maps to NotFound.
+fn multi_get_status(results: &[(String, Result<serde_json::Value>)]) -> Result<()> {
+    if let Some((id, e)) = results.iter().find_map(|(id, r)| match r {
+        Err(e) => Some((id, e)),
+        Ok(_) => None,
+    }) {
+        return Err(error::rewrap_with_message(
+            e,
+            format!("Error fetching {id}: {e}"),
+        ));
+    }
+
+    let missing: Vec<&str> = results
+        .iter()
+        .filter(|(_, r)| matches!(r, Ok(data) if data["data"]["issue"].is_null()))
+        .map(|(id, _)| id.as_str())
+        .collect();
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(CliError::not_found(format!("Issue(s) not found: {}", missing.join(", "))).into())
+    }
 }
 
 async fn open_issue(id: &str) -> Result<()> {
@@ -2265,6 +2297,47 @@ async fn transfer_issue(id: &str, team: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multi_get_status_ok_when_all_found() {
+        let results = vec![(
+            "LIN-1".to_string(),
+            Ok(json!({ "data": { "issue": { "id": "x" } } })),
+        )];
+        assert!(multi_get_status(&results).is_ok());
+        assert!(multi_get_status(&[]).is_ok());
+    }
+
+    #[test]
+    fn multi_get_status_notfound_when_issue_null() {
+        let results = vec![(
+            "LIN-9".to_string(),
+            Ok(json!({ "data": { "issue": null } })),
+        )];
+        let err = multi_get_status(&results).unwrap_err();
+        assert_eq!(err.downcast_ref::<CliError>().expect("CliError").code(), 2);
+    }
+
+    #[test]
+    fn multi_get_status_preserves_rate_limited_kind_over_notfound() {
+        // A 429 must stay RateLimited(4), not collapse to NotFound(2).
+        let results: Vec<(String, Result<Value>)> = vec![
+            (
+                "LIN-1".to_string(),
+                Ok(json!({ "data": { "issue": null } })),
+            ),
+            (
+                "LIN-2".to_string(),
+                Err(CliError::rate_limited("429")
+                    .with_retry_after(Some(3))
+                    .into()),
+            ),
+        ];
+        let err = multi_get_status(&results).unwrap_err();
+        let cli = err.downcast_ref::<CliError>().expect("CliError");
+        assert_eq!(cli.code(), 4);
+        assert_eq!(cli.retry_after, Some(3));
+    }
 
     #[test]
     fn test_format_history_state_change() {
