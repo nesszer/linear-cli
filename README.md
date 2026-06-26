@@ -83,6 +83,7 @@ linear-cli i get LIN-123 --comments              # Inline comments
 linear-cli i get LIN-1 LIN-2 LIN-3              # Batch fetch
 
 linear-cli i create "Fix login" -t ENG -p 1      # Create urgent issue
+linear-cli i create "Fix login" -t ENG --project "Q2 Roadmap"
 linear-cli i update LIN-123 -s Done              # Update status
 linear-cli i update LIN-123 -l bug -l urgent     # Add labels
 linear-cli i update LIN-123 --due tomorrow       # Set due date
@@ -99,6 +100,8 @@ linear-cli i archive LIN-123                     # Archive
 linear-cli i open LIN-123                        # Open in browser
 linear-cli i link LIN-123                        # Print URL
 ```
+
+**Create flags:** `--team`, `--description`, `--data`, `--priority`, `--state`, `--assignee`, `--labels`, `--due`, `--estimate`, `--project`, `--template`, `--dry-run`
 
 **List flags:** `--mine`, `--team`, `--state`, `--assignee`, `--project`, `--label`, `--since`, `--view`, `--group-by` (state/priority/assignee/project), `--count-only`, `--archived`
 

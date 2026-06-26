@@ -74,6 +74,13 @@ fn test_issues_help() {
 }
 
 #[test]
+fn test_issues_create_help_includes_project() {
+    let (code, stdout, _stderr) = run_cli(&["issues", "create", "--help"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("--project"));
+}
+
+#[test]
 fn test_teams_help() {
     let (code, stdout, _stderr) = run_cli(&["teams", "--help"]);
     assert_eq!(code, 0);

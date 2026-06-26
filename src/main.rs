@@ -1419,6 +1419,7 @@ impl Drop for StdoutRedirectGuard {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::{Mutex, OnceLock};
 
     #[cfg(unix)]
@@ -1584,6 +1585,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_resolve_pager_command_allows_absolute_path_when_trusted() {
         let (program, args) = resolve_pager_command("/usr/bin/less -R -F", true);
         assert_eq!(program, "/usr/bin/less");
