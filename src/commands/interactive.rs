@@ -149,23 +149,38 @@ pub async fn run(default_team: Option<String>) -> Result<()> {
 }
 
 async fn fetch_teams(client: &LinearClient) -> Result<Vec<Team>> {
+    use crate::pagination::{paginate_nodes, PaginationOptions};
+
     let query = r#"
-        query {
-            teams(first: 100) {
+        query($first: Int, $after: String) {
+            teams(first: $first, after: $after) {
                 nodes {
                     id
                     name
                     key
                 }
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
             }
         }
     "#;
 
-    let result = client.query(query, None).await?;
-    let empty = vec![];
-    let teams_json = result["data"]["teams"]["nodes"]
-        .as_array()
-        .unwrap_or(&empty);
+    let teams_json = paginate_nodes(
+        client,
+        query,
+        serde_json::Map::new(),
+        &["data", "teams", "nodes"],
+        &["data", "teams", "pageInfo"],
+        &PaginationOptions {
+            all: true,
+            page_size: Some(100),
+            ..Default::default()
+        },
+        100,
+    )
+    .await?;
 
     let teams: Vec<Team> = teams_json
         .iter()

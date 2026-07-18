@@ -749,14 +749,26 @@ Walks you through:
         #[arg(long)]
         team: Option<String>,
     },
-    /// Configure CLI settings - API keys and workspaces
-    #[command(after_help = r#"EXAMPLES:
+    /// Configure CLI settings - API keys, default team, and workspaces
+    #[command(after_help = r#"KNOWN KEYS:
+    api-key         API key (get only; set via `config set-key`)
+    profile         Active workspace profile
+    default-team    Default team key/name (also: default_team, team)
+
+EXAMPLES:
     printf '%s\n' "$LINEAR_API_KEY" | linear config set-key
     linear config get api-key               # Get API key (masked)
+    linear config set default-team ENG      # Persist default team
+    linear config get default-team          # Show default team
     linear config set profile work          # Switch profile
     linear config show                      # Show configuration
     printf '%s\n' "$LINEAR_API_KEY" | linear config workspace-add work
-    linear config workspace-switch work     # Switch workspace"#)]
+    linear config workspace-switch work     # Switch workspace
+
+ENV OVERRIDES:
+    LINEAR_CLI_TEAM     Overrides default-team for this process
+    LINEAR_CLI_PROFILE  Overrides active profile
+    LINEAR_CLI_OUTPUT   Default output format"#)]
     Config {
         #[command(subcommand)]
         action: ConfigCommands,
@@ -771,7 +783,7 @@ enum ConfigCommands {
     SetKey,
     /// Get a configuration value
     Get {
-        /// Config key to retrieve (api-key, profile)
+        /// Config key: api-key, profile, default-team
         key: ConfigGetKey,
         /// Output raw value without masking
         #[arg(long)]
@@ -779,7 +791,7 @@ enum ConfigCommands {
     },
     /// Set a configuration value
     Set {
-        /// Config key to set
+        /// Config key: profile, default-team
         key: ConfigSetKey,
         /// Value to set
         value: String,
@@ -832,6 +844,8 @@ enum ConfigGetKey {
     #[value(alias = "api_key")]
     ApiKey,
     Profile,
+    #[value(alias = "default_team", alias = "team")]
+    DefaultTeam,
 }
 
 impl std::fmt::Display for ConfigGetKey {
@@ -839,6 +853,7 @@ impl std::fmt::Display for ConfigGetKey {
         match self {
             Self::ApiKey => write!(f, "api-key"),
             Self::Profile => write!(f, "profile"),
+            Self::DefaultTeam => write!(f, "default-team"),
         }
     }
 }
@@ -846,12 +861,15 @@ impl std::fmt::Display for ConfigGetKey {
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum ConfigSetKey {
     Profile,
+    #[value(alias = "default_team", alias = "team")]
+    DefaultTeam,
 }
 
 impl std::fmt::Display for ConfigSetKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Profile => write!(f, "profile"),
+            Self::DefaultTeam => write!(f, "default-team"),
         }
     }
 }
@@ -995,7 +1013,14 @@ async fn async_main() -> Result<i32> {
 
     let exit_code = {
         // Keep the pager guard scoped so cleanup runs before main exits.
-        let _pager_guard = if should_use_pager(cli.no_pager, &cli.output, cli.quiet) {
+        // Never page interactive commands (setup/auth/TUI) — less captures keys
+        // and can leave the terminal in a bad state on macOS (see issue #34).
+        let _pager_guard = if should_use_pager(
+            cli.no_pager,
+            &cli.output,
+            cli.quiet,
+            command_disables_pager(&cli.command),
+        ) {
             setup_pager()
         } else {
             None
@@ -1137,7 +1162,10 @@ async fn run_command(
         Commands::Templates { action } => templates::handle(action, output).await?,
         Commands::Time { action } => time::handle(action, output).await?,
         Commands::Uploads { action } => uploads::handle(action).await?,
-        Commands::Interactive { team } => interactive::run(team).await?,
+        Commands::Interactive { team } => {
+            let team = team.or_else(config::get_default_team);
+            interactive::run(team).await?
+        }
         Commands::Context => handle_context(output, agent_opts, retry).await?,
         Commands::Favorites { action } => favorites::handle(action, output).await?,
         Commands::Roadmaps { action } => {
@@ -1228,9 +1256,26 @@ async fn run_command(
     Ok(())
 }
 
+/// Commands that own the terminal (prompts, password entry, full-screen TUI).
+/// Paging these breaks keyboard input and can leave the tty raw after exit.
+fn command_disables_pager(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Setup
+            | Commands::Interactive { .. }
+            | Commands::Auth { .. }
+            | Commands::Doctor { .. }
+    )
+}
+
 /// Determine if pager should be used
-fn should_use_pager(no_pager: bool, format: &OutputFormat, quiet: bool) -> bool {
-    if no_pager || quiet {
+fn should_use_pager(
+    no_pager: bool,
+    format: &OutputFormat,
+    quiet: bool,
+    interactive_command: bool,
+) -> bool {
+    if no_pager || quiet || interactive_command {
         return false;
     }
     // Only page table output, not JSON/NDJSON (those are for scripts)
@@ -1419,6 +1464,7 @@ impl Drop for StdoutRedirectGuard {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::{Mutex, OnceLock};
 
     #[cfg(unix)]
@@ -1545,6 +1591,41 @@ mod tests {
             outer_output.contains("restored outer redirect\n"),
             "outer pipe should receive stdout after restoration, got: {outer_output:?}"
         );
+    }
+
+    #[test]
+    fn test_should_use_pager_disabled_for_interactive_commands() {
+        assert!(!should_use_pager(
+            false,
+            &OutputFormat::Table,
+            false,
+            true
+        ));
+        // Non-interactive table on TTY would still depend on is_terminal; quiet/json off.
+        assert!(!should_use_pager(
+            true,
+            &OutputFormat::Table,
+            false,
+            false
+        ));
+        assert!(!should_use_pager(
+            false,
+            &OutputFormat::Json,
+            false,
+            false
+        ));
+        assert!(!should_use_pager(
+            false,
+            &OutputFormat::Table,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn test_command_disables_pager_for_setup() {
+        assert!(command_disables_pager(&Commands::Setup));
+        assert!(!command_disables_pager(&Commands::Common));
     }
 
     #[test]
@@ -1884,55 +1965,92 @@ async fn handle_setup(output: &OutputOptions) -> Result<()> {
     println!("Step 2: Default Team");
     let client = api::LinearClient::with_api_key(api_key.clone())?;
 
+    // Fetch *all* teams — Linear pages connections (default ~50); large
+    // workspaces need cursor pagination (issue #34).
     let teams_query = r#"
-        query {
-            teams {
+        query($first: Int, $after: String) {
+            teams(first: $first, after: $after) {
                 nodes {
                     id
                     name
                     key
                 }
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
             }
         }
     "#;
 
-    let data = client
-        .query(teams_query, None)
-        .await
-        .context("Could not validate API key or fetch teams")?;
+    let teams_arr = pagination::paginate_nodes(
+        &client,
+        teams_query,
+        serde_json::Map::new(),
+        &["data", "teams", "nodes"],
+        &["data", "teams", "pageInfo"],
+        &PaginationOptions {
+            all: true,
+            page_size: Some(100),
+            ..Default::default()
+        },
+        100,
+    )
+    .await
+    .context("Could not validate API key or fetch teams")?;
 
     config::set_api_key(&api_key)?;
     println!("  API key validated and saved.");
 
-    let teams = &data["data"]["teams"]["nodes"];
-    if let Some(teams_arr) = teams.as_array() {
-        if teams_arr.is_empty() {
-            println!("  No teams found. Skipping default team.");
-        } else {
-            println!("  Available teams:");
-            for (i, team) in teams_arr.iter().enumerate() {
-                let key = team["key"].as_str().unwrap_or("?");
-                let name = team["name"].as_str().unwrap_or("?");
-                println!("    {}. {} ({})", i + 1, name, key);
-            }
-            println!();
-            print!("  Select team number (or press Enter to skip): ");
-            io::stdout().flush()?;
+    let mut saved_team: Option<String> = None;
 
-            let mut choice = String::new();
-            io::stdin().read_line(&mut choice)?;
-            let choice = choice.trim();
+    if teams_arr.is_empty() {
+        println!("  No teams found. Skipping default team.");
+    } else {
+        println!("  Available teams ({}):", teams_arr.len());
+        for (i, team) in teams_arr.iter().enumerate() {
+            let key = team["key"].as_str().unwrap_or("?");
+            let name = team["name"].as_str().unwrap_or("?");
+            println!("    {}. {} ({})", i + 1, name, key);
+        }
+        println!();
+        print!("  Select team number (or press Enter to skip): ");
+        io::stdout().flush()?;
 
-            if !choice.is_empty() {
-                if let Ok(num) = choice.parse::<usize>() {
-                    if num >= 1 && num <= teams_arr.len() {
-                        let team = &teams_arr[num - 1];
-                        let key = team["key"].as_str().unwrap_or("?");
-                        println!("  Default team: {}", key);
-                        println!("  Tip: Use -t {} or set LINEAR_CLI_TEAM={}", key, key);
-                    } else {
-                        println!("  Invalid selection, skipping.");
-                    }
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice)?;
+        let choice = choice.trim();
+
+        if !choice.is_empty() {
+            if let Ok(num) = choice.parse::<usize>() {
+                if num >= 1 && num <= teams_arr.len() {
+                    let team = &teams_arr[num - 1];
+                    let key = team["key"].as_str().unwrap_or("?").to_string();
+                    config::set_default_team(Some(&key))?;
+                    saved_team = Some(key.clone());
+                    println!("  Default team saved: {}", key);
+                    println!(
+                        "  Tip: Override with -t {} or LINEAR_CLI_TEAM={}",
+                        key, key
+                    );
+                } else {
+                    println!("  Invalid selection, skipping.");
+                }
+            } else {
+                // Allow selecting by team key/name as well as number.
+                let needle = choice;
+                if let Some(team) = teams_arr.iter().find(|t| {
+                    t["key"]
+                        .as_str()
+                        .is_some_and(|k| k.eq_ignore_ascii_case(needle))
+                        || t["name"]
+                            .as_str()
+                            .is_some_and(|n| n.eq_ignore_ascii_case(needle))
+                }) {
+                    let key = team["key"].as_str().unwrap_or(needle).to_string();
+                    config::set_default_team(Some(&key))?;
+                    saved_team = Some(key.clone());
+                    println!("  Default team saved: {}", key);
                 } else {
                     println!("  Invalid input, skipping.");
                 }
@@ -1966,12 +2084,20 @@ async fn handle_setup(output: &OutputOptions) -> Result<()> {
 
     println!();
     println!("Setup complete!");
+    if let Some(ref team) = saved_team {
+        println!("  Default team: {} (persisted in config)", team);
+        println!("  Change later: linear config set default-team <KEY>");
+    } else {
+        println!("  Default team: not set");
+        println!("  Set later: linear config set default-team <KEY>");
+    }
 
     if output.is_json() || output.has_template() {
         print_json_owned(
             serde_json::json!({
                 "setup": true,
                 "api_key_saved": true,
+                "default_team": saved_team,
             }),
             output,
         )?;

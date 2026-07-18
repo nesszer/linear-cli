@@ -23,13 +23,43 @@ pub enum RelationType {
 }
 
 impl RelationType {
+    /// Linear's `IssueRelationType` only has `blocks`, `related`, and `duplicate`.
+    /// There is no `blockedBy` — "A is blocked by B" is stored as "B blocks A".
     fn to_api_string(self) -> &'static str {
         match self {
-            RelationType::Blocks => "blocks",
-            RelationType::BlockedBy => "blockedBy",
+            RelationType::Blocks | RelationType::BlockedBy => "blocks",
             RelationType::Related => "related",
             RelationType::Duplicate => "duplicate",
         }
+    }
+
+    /// Whether this CLI relation is the inverse of the Linear API direction.
+    fn is_inverted(self) -> bool {
+        matches!(self, RelationType::BlockedBy)
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            RelationType::Blocks => "blocks",
+            RelationType::BlockedBy => "blocked-by",
+            RelationType::Related => "related",
+            RelationType::Duplicate => "duplicate",
+        }
+    }
+}
+
+/// Resolve issue endpoints and API type for `issueRelationCreate`.
+///
+/// `blocked-by` is sugar for inverted `blocks`: `A blocked-by B` → `B blocks A`.
+fn resolve_relation_endpoints<'a>(
+    from: &'a str,
+    relation: RelationType,
+    to: &'a str,
+) -> (&'a str, &'a str, &'static str) {
+    if relation.is_inverted() {
+        (to, from, "blocks")
+    } else {
+        (from, to, relation.to_api_string())
     }
 }
 
@@ -294,6 +324,7 @@ async fn add_relation(
     output: &OutputOptions,
 ) -> Result<()> {
     let client = LinearClient::new()?;
+    let (issue_id, related_issue_id, api_type) = resolve_relation_endpoints(from, relation, to);
 
     let mutation = r#"
         mutation($issueId: String!, $relatedIssueId: String!, $type: IssueRelationType!) {
@@ -317,9 +348,9 @@ async fn add_relation(
         .mutate(
             mutation,
             Some(json!({
-                "issueId": from,
-                "relatedIssueId": to,
-                "type": relation.to_api_string()
+                "issueId": issue_id,
+                "relatedIssueId": related_issue_id,
+                "type": api_type
             })),
         )
         .await?;
@@ -328,11 +359,22 @@ async fn add_relation(
         print_json(&result["data"]["issueRelationCreate"], output)?;
     } else {
         let rel = &result["data"]["issueRelationCreate"]["issueRelation"];
+        // Show the user's from/to order and relation name (blocked-by is sugar).
+        let from_id = if relation.is_inverted() {
+            rel["relatedIssue"]["identifier"].as_str().unwrap_or(from)
+        } else {
+            rel["issue"]["identifier"].as_str().unwrap_or(from)
+        };
+        let to_id = if relation.is_inverted() {
+            rel["issue"]["identifier"].as_str().unwrap_or(to)
+        } else {
+            rel["relatedIssue"]["identifier"].as_str().unwrap_or(to)
+        };
         println!(
             "Created relation: {} {} {}",
-            rel["issue"]["identifier"].as_str().unwrap_or(from),
-            relation.to_api_string(),
-            rel["relatedIssue"]["identifier"].as_str().unwrap_or(to)
+            from_id,
+            relation.display_name(),
+            to_id
         );
     }
 
@@ -433,11 +475,16 @@ mod tests {
     #[test]
     fn test_relation_type_blocks() {
         assert_eq!(RelationType::Blocks.to_api_string(), "blocks");
+        assert!(!RelationType::Blocks.is_inverted());
+        assert_eq!(RelationType::Blocks.display_name(), "blocks");
     }
 
     #[test]
-    fn test_relation_type_blocked_by() {
-        assert_eq!(RelationType::BlockedBy.to_api_string(), "blockedBy");
+    fn test_relation_type_blocked_by_maps_to_blocks() {
+        // Linear has no blockedBy enum; CLI maps it to inverted blocks.
+        assert_eq!(RelationType::BlockedBy.to_api_string(), "blocks");
+        assert!(RelationType::BlockedBy.is_inverted());
+        assert_eq!(RelationType::BlockedBy.display_name(), "blocked-by");
     }
 
     #[test]
@@ -448,6 +495,25 @@ mod tests {
     #[test]
     fn test_relation_type_duplicate() {
         assert_eq!(RelationType::Duplicate.to_api_string(), "duplicate");
+    }
+
+    #[test]
+    fn test_resolve_relation_endpoints_blocks() {
+        let (issue_id, related_id, api_type) =
+            resolve_relation_endpoints("A", RelationType::Blocks, "B");
+        assert_eq!(issue_id, "A");
+        assert_eq!(related_id, "B");
+        assert_eq!(api_type, "blocks");
+    }
+
+    #[test]
+    fn test_resolve_relation_endpoints_blocked_by_swaps() {
+        // A blocked-by B  ==  B blocks A
+        let (issue_id, related_id, api_type) =
+            resolve_relation_endpoints("A", RelationType::BlockedBy, "B");
+        assert_eq!(issue_id, "B");
+        assert_eq!(related_id, "A");
+        assert_eq!(api_type, "blocks");
     }
 
     #[test]

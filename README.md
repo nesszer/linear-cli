@@ -449,8 +449,9 @@ Config is stored at `~/.config/linear-cli/config.toml` (Linux/macOS) or `%APPDAT
 
 ```bash
 linear-cli config show                           # Show current config
-linear-cli config get default_team               # Get a value
-linear-cli config set default_team ENG           # Set a value
+linear-cli config get default-team               # Get default team
+linear-cli config set default-team ENG           # Set default team
+# also accepted: default_team, team
 
 # Multiple workspaces
 linear-cli config workspace-add work             # Add workspace profile
