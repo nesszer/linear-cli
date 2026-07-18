@@ -149,23 +149,7 @@ pub async fn run(default_team: Option<String>) -> Result<()> {
 }
 
 async fn fetch_teams(client: &LinearClient) -> Result<Vec<Team>> {
-    let query = r#"
-        query {
-            teams(first: 100) {
-                nodes {
-                    id
-                    name
-                    key
-                }
-            }
-        }
-    "#;
-
-    let result = client.query(query, None).await?;
-    let empty = vec![];
-    let teams_json = result["data"]["teams"]["nodes"]
-        .as_array()
-        .unwrap_or(&empty);
+    let teams_json = crate::api::fetch_all_teams(client).await?;
 
     let teams: Vec<Team> = teams_json
         .iter()

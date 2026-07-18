@@ -99,6 +99,10 @@ fn test_config_help() {
     assert!(stdout.contains("show"));
     assert!(stdout.contains("workspace-add"));
     assert!(stdout.contains("workspace-list"));
+    assert!(
+        stdout.contains("default-team") || stdout.contains("default_team"),
+        "config help should document default-team key"
+    );
 }
 
 #[test]
@@ -109,10 +113,32 @@ fn test_top_level_help_does_not_expose_api_key_flag() {
 }
 
 #[test]
-fn test_config_set_help_only_allows_profile() {
+fn test_config_set_rejects_api_key_on_argv() {
     let (code, _stdout, stderr) = run_cli(&["config", "set", "api-key", "dummy"]);
     assert_ne!(code, 0);
     assert!(stderr.contains("invalid value") || stderr.contains("api-key"));
+}
+
+#[test]
+fn test_config_set_accepts_default_team() {
+    let (code, stdout, _stderr) = run_cli(&["config", "set", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("default-team") || stdout.contains("DefaultTeam"),
+        "config set should accept default-team: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_config_get_accepts_default_team() {
+    let (code, stdout, _stderr) = run_cli(&["config", "get", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("default-team") || stdout.contains("DefaultTeam"),
+        "config get should accept default-team: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -396,6 +422,18 @@ fn test_relations_help() {
     assert!(stdout.contains("list"));
     assert!(stdout.contains("add"));
     assert!(stdout.contains("remove"));
+}
+
+#[test]
+fn test_relations_add_help_lists_blocked_by() {
+    let (code, stdout, _stderr) = run_cli(&["relations", "add", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("blocked-by") || stdout.contains("blockedBy"),
+        "relations add should advertise blocked-by: {}",
+        stdout
+    );
+    assert!(stdout.contains("blocks"));
 }
 
 #[test]
@@ -1378,12 +1416,24 @@ fn test_sprint_alias() {
 
 #[test]
 fn test_sprint_status_requires_team() {
+    // Without default-team / LINEAR_CLI_TEAM, sprint status still fails.
     let (code, _stdout, stderr) = run_cli(&["sprint", "status"]);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("--team") || stderr.contains("required"),
-        "sprint status should require --team flag"
+        stderr.contains("--team")
+            || stderr.contains("required")
+            || stderr.contains("default-team")
+            || stderr.contains("default team"),
+        "sprint status should require team or default-team: {}",
+        stderr
     );
+}
+
+fn team_required_error(stderr: &str) -> bool {
+    stderr.contains("--team")
+        || stderr.contains("required")
+        || stderr.contains("default-team")
+        || stderr.contains("default team")
 }
 
 #[test]
@@ -1391,8 +1441,9 @@ fn test_sprint_progress_requires_team() {
     let (code, _stdout, stderr) = run_cli(&["sprint", "progress"]);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("--team") || stderr.contains("required"),
-        "sprint progress should require --team flag"
+        team_required_error(&stderr),
+        "sprint progress should require team or default-team: {}",
+        stderr
     );
 }
 
@@ -1401,8 +1452,9 @@ fn test_sprint_plan_requires_team() {
     let (code, _stdout, stderr) = run_cli(&["sprint", "plan"]);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("--team") || stderr.contains("required"),
-        "sprint plan should require --team flag"
+        team_required_error(&stderr),
+        "sprint plan should require team or default-team: {}",
+        stderr
     );
 }
 
@@ -1411,8 +1463,9 @@ fn test_sprint_carry_over_requires_team() {
     let (code, _stdout, stderr) = run_cli(&["sprint", "carry-over"]);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("--team") || stderr.contains("required"),
-        "sprint carry-over should require --team flag"
+        team_required_error(&stderr),
+        "sprint carry-over should require team or default-team: {}",
+        stderr
     );
 }
 

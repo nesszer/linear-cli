@@ -12,36 +12,36 @@ use crate::output::{print_json, print_json_owned, OutputOptions};
 pub enum SprintCommands {
     /// Show current sprint status and progress
     Status {
-        /// Team key, name, or ID
+        /// Team key, name, or ID (falls back to default-team / LINEAR_CLI_TEAM)
         #[arg(short, long)]
-        team: String,
+        team: Option<String>,
     },
     /// Show sprint progress (completion %)
     Progress {
-        /// Team key, name, or ID
+        /// Team key, name, or ID (falls back to default-team / LINEAR_CLI_TEAM)
         #[arg(short, long)]
-        team: String,
+        team: Option<String>,
     },
     /// List issues planned for next cycle
     Plan {
-        /// Team key, name, or ID
+        /// Team key, name, or ID (falls back to default-team / LINEAR_CLI_TEAM)
         #[arg(short, long)]
-        team: String,
+        team: Option<String>,
     },
     /// Move incomplete issues from current cycle to next
     CarryOver {
-        /// Team key, name, or ID
+        /// Team key, name, or ID (falls back to default-team / LINEAR_CLI_TEAM)
         #[arg(short, long)]
-        team: String,
+        team: Option<String>,
         /// Skip confirmation
         #[arg(short, long)]
         force: bool,
     },
     /// Show ASCII burndown chart for current sprint
     Burndown {
-        /// Team key, name, or ID
+        /// Team key, name, or ID (falls back to default-team / LINEAR_CLI_TEAM)
         #[arg(short, long)]
-        team: String,
+        team: Option<String>,
         /// Chart width in characters (default: 60)
         #[arg(long, default_value = "60")]
         width: usize,
@@ -51,9 +51,9 @@ pub enum SprintCommands {
     },
     /// Show sprint velocity across recent cycles
     Velocity {
-        /// Team key, name, or ID
+        /// Team key, name, or ID (falls back to default-team / LINEAR_CLI_TEAM)
         #[arg(short, long)]
-        team: String,
+        team: Option<String>,
         /// Number of past cycles to analyze (default: 6)
         #[arg(short = 'n', long, default_value = "6")]
         count: usize,
@@ -62,16 +62,34 @@ pub enum SprintCommands {
 
 pub async fn handle(cmd: SprintCommands, output: &OutputOptions) -> Result<()> {
     match cmd {
-        SprintCommands::Status { team } => sprint_status(&team, output).await,
-        SprintCommands::Progress { team } => sprint_progress(&team, output).await,
-        SprintCommands::Plan { team } => sprint_plan(&team, output).await,
-        SprintCommands::CarryOver { team, force } => sprint_carry_over(&team, force, output).await,
+        SprintCommands::Status { team } => {
+            let team = crate::config::require_team(team)?;
+            sprint_status(&team, output).await
+        }
+        SprintCommands::Progress { team } => {
+            let team = crate::config::require_team(team)?;
+            sprint_progress(&team, output).await
+        }
+        SprintCommands::Plan { team } => {
+            let team = crate::config::require_team(team)?;
+            sprint_plan(&team, output).await
+        }
+        SprintCommands::CarryOver { team, force } => {
+            let team = crate::config::require_team(team)?;
+            sprint_carry_over(&team, force, output).await
+        }
         SprintCommands::Burndown {
             team,
             width,
             height,
-        } => burndown(&team, width, height, output).await,
-        SprintCommands::Velocity { team, count } => velocity(&team, count, output).await,
+        } => {
+            let team = crate::config::require_team(team)?;
+            burndown(&team, width, height, output).await
+        }
+        SprintCommands::Velocity { team, count } => {
+            let team = crate::config::require_team(team)?;
+            velocity(&team, count, output).await
+        }
     }
 }
 

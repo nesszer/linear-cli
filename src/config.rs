@@ -26,6 +26,19 @@ pub struct Workspace {
     pub api_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OAuthConfig>,
+    /// Default team key/name for commands that accept `--team`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_team: Option<String>,
+}
+
+impl Workspace {
+    pub fn with_api_key(api_key: impl Into<String>) -> Self {
+        Self {
+            api_key: api_key.into(),
+            oauth: None,
+            default_team: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -56,17 +69,12 @@ pub fn load_config() -> Result<Config> {
         // Migrate legacy api_key to workspaces if needed
         if let Some(legacy_key) = config.api_key.take() {
             if !config.workspaces.contains_key("default") {
-                config.workspaces.insert(
-                    "default".to_string(),
-                    Workspace {
-                        api_key: legacy_key,
-                        oauth: None,
-                    },
-                );
+                config
+                    .workspaces
+                    .insert("default".to_string(), Workspace::with_api_key(legacy_key));
                 if config.current.is_none() {
                     config.current = Some("default".to_string());
                 }
-                // Save migrated config
                 save_config(&config)?;
             }
         }
@@ -109,30 +117,93 @@ pub fn save_config(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Resolve profile name for read/write without the process-lifetime cache used by
+/// [`current_profile`]. Prefer this when the config may still be mid-setup.
+fn resolve_profile_name(config: &Config) -> String {
+    std::env::var("LINEAR_CLI_PROFILE")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .or_else(|| config.current.clone())
+        .unwrap_or_else(|| "default".to_string())
+}
+
 pub fn set_api_key(key: &str) -> Result<()> {
     let mut config = load_config()?;
-    let profile = std::env::var("LINEAR_CLI_PROFILE")
-        .ok()
-        .filter(|p| !p.is_empty());
-    let workspace_name = profile
-        .or_else(|| config.current.clone())
-        .unwrap_or_else(|| "default".to_string());
-    let existing_oauth = config
+    let workspace_name = resolve_profile_name(&config);
+    let workspace = config
         .workspaces
-        .get(&workspace_name)
-        .and_then(|w| w.oauth.clone());
-    config.workspaces.insert(
-        workspace_name.clone(),
-        Workspace {
-            api_key: key.to_string(),
-            oauth: existing_oauth,
-        },
-    );
+        .entry(workspace_name.clone())
+        .or_insert_with(|| Workspace::with_api_key(""));
+    workspace.api_key = key.to_string();
     if config.current.is_none() {
-        config.current = Some(workspace_name.clone());
+        config.current = Some(workspace_name);
     }
     save_config(&config)?;
     Ok(())
+}
+
+/// Stored default team for the active workspace (config file only; no env).
+pub fn get_stored_default_team() -> Option<String> {
+    let config = load_config().ok()?;
+    let profile = resolve_profile_name(&config);
+    config
+        .workspaces
+        .get(&profile)
+        .and_then(|w| w.default_team.clone())
+        .filter(|t| !t.trim().is_empty())
+}
+
+/// Effective default team: `LINEAR_CLI_TEAM` env, then stored workspace default.
+pub fn get_default_team() -> Option<String> {
+    if let Ok(team) = std::env::var("LINEAR_CLI_TEAM") {
+        let team = team.trim().to_string();
+        if !team.is_empty() {
+            return Some(team);
+        }
+    }
+    get_stored_default_team()
+}
+
+/// CLI `--team` / positional override, then effective default team.
+pub fn resolve_team_arg(cli: Option<String>) -> Option<String> {
+    cli.map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(get_default_team)
+}
+
+/// Like [`resolve_team_arg`], but errors when nothing is configured.
+pub fn require_team(cli: Option<String>) -> Result<String> {
+    resolve_team_arg(cli).ok_or_else(|| {
+        anyhow::anyhow!(
+            "--team is required (or set a default: linear config set default-team TEAM)"
+        )
+    })
+}
+
+/// Set the default team for the current workspace. Requires an existing workspace.
+pub fn set_default_team(team: Option<&str>) -> Result<()> {
+    let mut config = load_config()?;
+    let profile = resolve_profile_name(&config);
+    let workspace = config.workspaces.get_mut(&profile).with_context(|| {
+        format!(
+            "Workspace '{}' not found. Run setup or: linear config set-key first.",
+            profile
+        )
+    })?;
+    workspace.default_team = team
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string());
+    if config.current.is_none() {
+        config.current = Some(profile);
+    }
+    save_config(&config)?;
+    Ok(())
+}
+
+/// Known configuration keys for get/set (for help and error messages).
+pub fn known_config_keys() -> &'static [&'static str] {
+    &["api-key", "profile", "default-team"]
 }
 
 fn read_secret_from_stdin_or_prompt(prompt: &str) -> Result<String> {
@@ -233,14 +304,11 @@ pub fn current_profile() -> Result<String> {
 
 pub fn set_workspace_key(name: &str, api_key: &str) -> Result<()> {
     let mut config = load_config()?;
-    let existing_oauth = config.workspaces.get(name).and_then(|w| w.oauth.clone());
-    config.workspaces.insert(
-        name.to_string(),
-        Workspace {
-            api_key: api_key.to_string(),
-            oauth: existing_oauth,
-        },
-    );
+    let workspace = config
+        .workspaces
+        .entry(name.to_string())
+        .or_insert_with(|| Workspace::with_api_key(""));
+    workspace.api_key = api_key.to_string();
     if config.current.is_none() {
         config.current = Some(name.to_string());
     }
@@ -262,7 +330,20 @@ pub fn config_get(key: &str, raw: bool) -> Result<()> {
             let profile = current_profile()?;
             println!("{}", profile);
         }
-        _ => anyhow::bail!("Unknown config key: {}", key),
+        // Stored value only — env override is separate (see show / get_default_team).
+        "default-team" | "default_team" | "team" => match get_stored_default_team() {
+            Some(team) => println!("{}", team),
+            None => {
+                if !raw {
+                    println!("(not set)");
+                }
+            }
+        },
+        _ => anyhow::bail!(
+            "Unknown config key: {}. Known keys: {}",
+            key,
+            known_config_keys().join(", ")
+        ),
     }
     Ok(())
 }
@@ -273,7 +354,16 @@ pub fn config_set(key: &str, value: &str) -> Result<()> {
             "Setting api-key via argv is disabled. Use `linear config set-key` and provide the key via stdin or the hidden prompt."
         ),
         "profile" => workspace_switch(value),
-        _ => anyhow::bail!("Unknown config key: {}", key),
+        "default-team" | "default_team" | "team" => {
+            set_default_team(Some(value))?;
+            println!("Default team set to '{}'", value.trim());
+            Ok(())
+        }
+        _ => anyhow::bail!(
+            "Unknown config key: {}. Known keys: {}",
+            key,
+            known_config_keys().join(", ")
+        ),
     }
 }
 
@@ -283,14 +373,26 @@ pub fn show_config() -> Result<()> {
 
     println!("Config file: {}", path.display());
     println!();
+    println!("Known keys: {}", known_config_keys().join(", "));
+    println!();
 
     if let Some(current) = &config.current {
         println!("Current workspace: {}", current);
         if let Some(workspace) = config.workspaces.get(current) {
             println!("API Key: {}", mask_api_key_for_display(&workspace.api_key));
+            match &workspace.default_team {
+                Some(team) if !team.is_empty() => println!("Default team: {}", team),
+                _ => println!("Default team: (not set)"),
+            }
         }
     } else {
         println!("No workspace configured. Run: linear workspace add <name>");
+    }
+
+    if let Ok(env_team) = std::env::var("LINEAR_CLI_TEAM") {
+        if !env_team.trim().is_empty() {
+            println!("LINEAR_CLI_TEAM (overrides config): {}", env_team.trim());
+        }
     }
 
     Ok(())
@@ -308,13 +410,9 @@ pub fn workspace_add(name: &str, api_key: &str) -> Result<()> {
         );
     }
 
-    config.workspaces.insert(
-        name.to_string(),
-        Workspace {
-            api_key: api_key.to_string(),
-            oauth: None,
-        },
-    );
+    config
+        .workspaces
+        .insert(name.to_string(), Workspace::with_api_key(api_key));
 
     // If this is the first workspace, make it current
     if config.current.is_none() {
@@ -422,10 +520,7 @@ pub fn save_oauth_config(profile: &str, oauth_config: &OAuthConfig) -> Result<()
     let workspace = config
         .workspaces
         .entry(profile.to_string())
-        .or_insert_with(|| Workspace {
-            api_key: String::new(),
-            oauth: None,
-        });
+        .or_insert_with(|| Workspace::with_api_key(""));
     workspace.oauth = Some(oauth_config.clone());
     if config.current.is_none() {
         config.current = Some(profile.to_string());
@@ -552,18 +647,11 @@ mod tests {
         };
         config.workspaces.insert(
             "prod".to_string(),
-            Workspace {
-                api_key: "lin_api_prod123".to_string(),
-                oauth: None,
-            },
+            Workspace::with_api_key("lin_api_prod123"),
         );
-        config.workspaces.insert(
-            "staging".to_string(),
-            Workspace {
-                api_key: "lin_api_staging456".to_string(),
-                oauth: None,
-            },
-        );
+        let mut staging = Workspace::with_api_key("lin_api_staging456");
+        staging.default_team = Some("ENG".to_string());
+        config.workspaces.insert("staging".to_string(), staging);
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: Config = toml::from_str(&toml_str).unwrap();
@@ -572,6 +660,11 @@ mod tests {
         assert_eq!(parsed.workspaces.len(), 2);
         assert_eq!(parsed.workspaces["prod"].api_key, "lin_api_prod123");
         assert_eq!(parsed.workspaces["staging"].api_key, "lin_api_staging456");
+        assert_eq!(
+            parsed.workspaces["staging"].default_team.as_deref(),
+            Some("ENG")
+        );
+        assert!(parsed.workspaces["prod"].default_team.is_none());
     }
 
     #[test]
@@ -704,20 +797,18 @@ mod tests {
             current: Some("oauth-test".to_string()),
             ..Default::default()
         };
-        config.workspaces.insert(
-            "oauth-test".to_string(),
-            Workspace {
-                api_key: String::new(),
-                oauth: Some(OAuthConfig {
-                    client_id: "my-app".to_string(),
-                    access_token: "lin_oauth_token123".to_string(),
-                    refresh_token: Some("lin_refresh_abc".to_string()),
-                    expires_at: Some(1700000000),
-                    token_type: "Bearer".to_string(),
-                    scopes: vec!["read".to_string(), "write".to_string()],
-                }),
-            },
-        );
+        let mut oauth_ws = Workspace::with_api_key("");
+        oauth_ws.oauth = Some(OAuthConfig {
+            client_id: "my-app".to_string(),
+            access_token: "lin_oauth_token123".to_string(),
+            refresh_token: Some("lin_refresh_abc".to_string()),
+            expires_at: Some(1700000000),
+            token_type: "Bearer".to_string(),
+            scopes: vec!["read".to_string(), "write".to_string()],
+        });
+        config
+            .workspaces
+            .insert("oauth-test".to_string(), oauth_ws);
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: Config = toml::from_str(&toml_str).unwrap();
@@ -738,13 +829,9 @@ mod tests {
             current: Some("default".to_string()),
             ..Default::default()
         };
-        config.workspaces.insert(
-            "default".to_string(),
-            Workspace {
-                api_key: "lin_api_key".to_string(),
-                oauth: None,
-            },
-        );
+        config
+            .workspaces
+            .insert("default".to_string(), Workspace::with_api_key("lin_api_key"));
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
         assert!(
@@ -843,5 +930,60 @@ mod tests {
         assert!(err
             .to_string()
             .contains("Setting api-key via argv is disabled"));
+    }
+
+    #[test]
+    fn test_config_get_unknown_key_lists_known_keys() {
+        let err = config_get("nope", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown config key"));
+        assert!(msg.contains("default-team"));
+        assert!(msg.contains("api-key"));
+        assert!(msg.contains("profile"));
+    }
+
+    #[test]
+    fn test_default_team_roundtrip_toml() {
+        let mut config = Config {
+            current: Some("default".to_string()),
+            ..Default::default()
+        };
+        let mut ws = Workspace::with_api_key("lin_api_key");
+        ws.default_team = Some("ENG".to_string());
+        config.workspaces.insert("default".to_string(), ws);
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(toml_str.contains("default_team"));
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            parsed.workspaces["default"].default_team.as_deref(),
+            Some("ENG")
+        );
+    }
+
+    #[test]
+    fn test_known_config_keys() {
+        let keys = known_config_keys();
+        assert!(keys.contains(&"api-key"));
+        assert!(keys.contains(&"profile"));
+        assert!(keys.contains(&"default-team"));
+    }
+
+    #[test]
+    fn test_resolve_team_arg_prefers_cli() {
+        assert_eq!(
+            resolve_team_arg(Some("CLI".to_string())).as_deref(),
+            Some("CLI")
+        );
+    }
+
+    #[test]
+    fn test_resolve_team_arg_empty_cli_falls_through() {
+        // Without env/config this is None; empty CLI must not win.
+        let result = resolve_team_arg(Some("  ".to_string()));
+        // May be Some if env is set in the process; never equal to whitespace.
+        if let Some(t) = result {
+            assert_ne!(t.trim(), "");
+        }
     }
 }

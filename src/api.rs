@@ -238,6 +238,32 @@ pub async fn resolve_team_id(
     resolve_id(client, team, cache_opts, &config, find_team_id).await
 }
 
+/// Fetch every team the viewer can see (cursor-paginated).
+pub async fn fetch_all_teams(client: &LinearClient) -> Result<Vec<Value>> {
+    let query = r#"
+        query($first: Int, $after: String) {
+            teams(first: $first, after: $after) {
+                nodes { id name key }
+                pageInfo { hasNextPage endCursor }
+            }
+        }
+    "#;
+    paginate_nodes(
+        client,
+        query,
+        serde_json::Map::new(),
+        &["data", "teams", "nodes"],
+        &["data", "teams", "pageInfo"],
+        &PaginationOptions {
+            all: true,
+            page_size: Some(100),
+            ..Default::default()
+        },
+        100,
+    )
+    .await
+}
+
 /// Resolve a user identifier to a UUID.
 /// Handles "me", UUIDs, names, and emails.
 pub async fn resolve_user_id(
