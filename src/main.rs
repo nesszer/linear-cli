@@ -18,14 +18,14 @@ mod text;
 mod types;
 mod vcs;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 use commands::{
     attachments, auth, bulk, comments, cycles, doctor, documents, export, favorites, git, history,
     import, initiatives, interactive, issues, labels, metrics, notifications, project_updates,
-    projects, relations, roadmaps, search, sprint, statuses, sync, teams, templates, time, triage,
-    update, uploads, users, views, watch, webhooks,
+    projects, relations, roadmaps, search, setup, sprint, statuses, sync, teams, templates, time,
+    triage, update, uploads, users, views, watch, webhooks,
 };
 use error::CliError;
 use output::print_json_owned;
@@ -1163,8 +1163,7 @@ async fn run_command(
         Commands::Time { action } => time::handle(action, output).await?,
         Commands::Uploads { action } => uploads::handle(action).await?,
         Commands::Interactive { team } => {
-            let team = team.or_else(config::get_default_team);
-            interactive::run(team).await?
+            interactive::run(config::resolve_team_arg(team)).await?
         }
         Commands::Context => handle_context(output, agent_opts, retry).await?,
         Commands::Favorites { action } => favorites::handle(action, output).await?,
@@ -1196,7 +1195,7 @@ async fn run_command(
         Commands::Relations { action } => relations::handle(action, output).await?,
         Commands::Whoami => users::handle(users::UserCommands::Me, output).await?,
         Commands::Done { status } => handle_done(&status, output, agent_opts, retry).await?,
-        Commands::Setup => handle_setup(output).await?,
+        Commands::Setup => setup::handle(output).await?,
         Commands::Sprint { action } => sprint::handle(action, output).await?,
         Commands::Completions { action } => match action {
             CompletionCommands::Static { shell } => {
@@ -1259,12 +1258,10 @@ async fn run_command(
 /// Commands that own the terminal (prompts, password entry, full-screen TUI).
 /// Paging these breaks keyboard input and can leave the tty raw after exit.
 fn command_disables_pager(command: &Commands) -> bool {
+    // Terminal owners only (password prompts / TUI). Doctor is output-oriented.
     matches!(
         command,
-        Commands::Setup
-            | Commands::Interactive { .. }
-            | Commands::Auth { .. }
-            | Commands::Doctor { .. }
+        Commands::Setup | Commands::Interactive { .. } | Commands::Auth { .. }
     )
 }
 
@@ -1651,13 +1648,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_pager_command_rejects_absolute_path_bypass() {
-        let (program, args) = resolve_pager_command("/tmp/evil/less --steal", false);
-        assert_eq!(program, "less");
-        assert!(args.is_empty());
-    }
-
-    #[test]
     fn test_resolve_pager_command_rejects_relative_path_bypass() {
         let (program, args) = resolve_pager_command("./less", false);
         assert_eq!(program, "less");
@@ -1665,17 +1655,35 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_pager_command_rejects_relative_path_even_when_trusted() {
+        let (program, args) = resolve_pager_command("./less -R", true);
+        assert_eq!(program, "less");
+        assert!(args.is_empty());
+    }
+
+    // Unix path roots are absolute only on Unix; Windows uses drive-letter paths.
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_pager_command_rejects_absolute_path_bypass() {
+        let (program, args) = resolve_pager_command("/tmp/evil/less --steal", false);
+        assert_eq!(program, "less");
+        assert!(args.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_resolve_pager_command_allows_absolute_path_when_trusted() {
         let (program, args) = resolve_pager_command("/usr/bin/less -R -F", true);
         assert_eq!(program, "/usr/bin/less");
         assert_eq!(args, vec!["-R", "-F"]);
     }
 
+    #[cfg(windows)]
     #[test]
-    fn test_resolve_pager_command_rejects_relative_path_even_when_trusted() {
-        let (program, args) = resolve_pager_command("./less -R", true);
-        assert_eq!(program, "less");
-        assert!(args.is_empty());
+    fn test_resolve_pager_command_allows_windows_absolute_path_when_trusted() {
+        let (program, args) = resolve_pager_command(r"C:\bin\less -R -F", true);
+        assert_eq!(program, r"C:\bin\less");
+        assert_eq!(args, vec!["-R", "-F"]);
     }
 }
 
@@ -1920,187 +1928,6 @@ async fn handle_done(
             .as_str()
             .unwrap_or(status);
         println!("+ {} -> {}", identifier, new_state);
-    }
-
-    Ok(())
-}
-
-/// Handle the `setup` command — guided onboarding wizard
-async fn handle_setup(output: &OutputOptions) -> Result<()> {
-    use dialoguer::Password;
-    use std::io::{self, IsTerminal, Write};
-
-    println!("Linear CLI Setup");
-    println!("{}", "-".repeat(40));
-    println!();
-
-    // Step 1: API Key
-    println!("Step 1: Authentication");
-    println!("  Get your API key from: https://linear.app/settings/api");
-    println!();
-    let api_key = if io::stdin().is_terminal() {
-        Password::new()
-            .with_prompt("  Enter your Linear API key")
-            .allow_empty_password(false)
-            .interact()
-            .context("Failed to read Linear API key")?
-            .trim()
-            .to_string()
-    } else {
-        print!("  Enter your Linear API key: ");
-        io::stdout().flush()?;
-        let mut api_key = String::new();
-        io::stdin().read_line(&mut api_key)?;
-        api_key.trim().to_string()
-    };
-
-    if api_key.is_empty() {
-        anyhow::bail!("API key cannot be empty");
-    }
-
-    println!("  Validating API key...");
-    println!();
-
-    // Step 2: Validate the key and pick default team
-    println!("Step 2: Default Team");
-    let client = api::LinearClient::with_api_key(api_key.clone())?;
-
-    // Fetch *all* teams — Linear pages connections (default ~50); large
-    // workspaces need cursor pagination (issue #34).
-    let teams_query = r#"
-        query($first: Int, $after: String) {
-            teams(first: $first, after: $after) {
-                nodes {
-                    id
-                    name
-                    key
-                }
-                pageInfo {
-                    hasNextPage
-                    endCursor
-                }
-            }
-        }
-    "#;
-
-    let teams_arr = pagination::paginate_nodes(
-        &client,
-        teams_query,
-        serde_json::Map::new(),
-        &["data", "teams", "nodes"],
-        &["data", "teams", "pageInfo"],
-        &PaginationOptions {
-            all: true,
-            page_size: Some(100),
-            ..Default::default()
-        },
-        100,
-    )
-    .await
-    .context("Could not validate API key or fetch teams")?;
-
-    config::set_api_key(&api_key)?;
-    println!("  API key validated and saved.");
-
-    let mut saved_team: Option<String> = None;
-
-    if teams_arr.is_empty() {
-        println!("  No teams found. Skipping default team.");
-    } else {
-        println!("  Available teams ({}):", teams_arr.len());
-        for (i, team) in teams_arr.iter().enumerate() {
-            let key = team["key"].as_str().unwrap_or("?");
-            let name = team["name"].as_str().unwrap_or("?");
-            println!("    {}. {} ({})", i + 1, name, key);
-        }
-        println!();
-        print!("  Select team number (or press Enter to skip): ");
-        io::stdout().flush()?;
-
-        let mut choice = String::new();
-        io::stdin().read_line(&mut choice)?;
-        let choice = choice.trim();
-
-        if !choice.is_empty() {
-            if let Ok(num) = choice.parse::<usize>() {
-                if num >= 1 && num <= teams_arr.len() {
-                    let team = &teams_arr[num - 1];
-                    let key = team["key"].as_str().unwrap_or("?").to_string();
-                    config::set_default_team(Some(&key))?;
-                    saved_team = Some(key.clone());
-                    println!("  Default team saved: {}", key);
-                    println!(
-                        "  Tip: Override with -t {} or LINEAR_CLI_TEAM={}",
-                        key, key
-                    );
-                } else {
-                    println!("  Invalid selection, skipping.");
-                }
-            } else {
-                // Allow selecting by team key/name as well as number.
-                let needle = choice;
-                if let Some(team) = teams_arr.iter().find(|t| {
-                    t["key"]
-                        .as_str()
-                        .is_some_and(|k| k.eq_ignore_ascii_case(needle))
-                        || t["name"]
-                            .as_str()
-                            .is_some_and(|n| n.eq_ignore_ascii_case(needle))
-                }) {
-                    let key = team["key"].as_str().unwrap_or(needle).to_string();
-                    config::set_default_team(Some(&key))?;
-                    saved_team = Some(key.clone());
-                    println!("  Default team saved: {}", key);
-                } else {
-                    println!("  Invalid input, skipping.");
-                }
-            }
-        }
-    }
-
-    println!();
-
-    // Step 3: Output format
-    println!("Step 3: Output Format");
-    println!("  1. table (default, human-readable)");
-    println!("  2. json (machine-readable, for scripts/agents)");
-    println!();
-    print!("  Select format [1]: ");
-    io::stdout().flush()?;
-
-    let mut format_choice = String::new();
-    io::stdin().read_line(&mut format_choice)?;
-    let format_choice = format_choice.trim();
-
-    match format_choice {
-        "2" | "json" => {
-            println!("  Output format: json");
-            println!("  Tip: Set LINEAR_CLI_OUTPUT=json in your shell profile.");
-        }
-        _ => {
-            println!("  Output format: table (default)");
-        }
-    }
-
-    println!();
-    println!("Setup complete!");
-    if let Some(ref team) = saved_team {
-        println!("  Default team: {} (persisted in config)", team);
-        println!("  Change later: linear config set default-team <KEY>");
-    } else {
-        println!("  Default team: not set");
-        println!("  Set later: linear config set default-team <KEY>");
-    }
-
-    if output.is_json() || output.has_template() {
-        print_json_owned(
-            serde_json::json!({
-                "setup": true,
-                "api_key_saved": true,
-                "default_team": saved_team,
-            }),
-            output,
-        )?;
     }
 
     Ok(())

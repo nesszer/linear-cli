@@ -24,6 +24,7 @@ pub mod projects;
 pub mod relations;
 pub mod roadmaps;
 pub mod search;
+pub mod setup;
 pub mod sprint;
 pub mod statuses;
 pub mod sync;

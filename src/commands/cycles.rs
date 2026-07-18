@@ -19,9 +19,9 @@ pub enum CycleCommands {
     /// List cycles for a team
     #[command(alias = "ls")]
     List {
-        /// Team ID or name
+        /// Team ID or name (falls back to default-team / LINEAR_CLI_TEAM)
         #[arg(short, long)]
-        team: String,
+        team: Option<String>,
         /// Include completed cycles
         #[arg(short, long)]
         all: bool,
@@ -33,15 +33,15 @@ pub enum CycleCommands {
     },
     /// Show the current active cycle
     Current {
-        /// Team ID or name
+        /// Team ID or name (falls back to default-team / LINEAR_CLI_TEAM)
         #[arg(short, long)]
-        team: String,
+        team: Option<String>,
     },
     /// Create a new cycle
     Create {
-        /// Team key, name, or ID
+        /// Team key, name, or ID (falls back to default-team / LINEAR_CLI_TEAM)
         #[arg(short, long)]
-        team: String,
+        team: Option<String>,
         /// Cycle name
         #[arg(short, long)]
         name: Option<String>,
@@ -110,16 +110,25 @@ struct CycleRow {
 
 pub async fn handle(cmd: CycleCommands, output: &OutputOptions) -> Result<()> {
     match cmd {
-        CycleCommands::List { team, all } => list_cycles(&team, all, output).await,
+        CycleCommands::List { team, all } => {
+            let team = crate::config::require_team(team)?;
+            list_cycles(&team, all, output).await
+        }
         CycleCommands::Get { id } => get_cycle(&id, output).await,
-        CycleCommands::Current { team } => current_cycle(&team, output).await,
+        CycleCommands::Current { team } => {
+            let team = crate::config::require_team(team)?;
+            current_cycle(&team, output).await
+        }
         CycleCommands::Create {
             team,
             name,
             description,
             starts_at,
             ends_at,
-        } => create_cycle(&team, name, description, starts_at, ends_at, output).await,
+        } => {
+            let team = crate::config::require_team(team)?;
+            create_cycle(&team, name, description, starts_at, ends_at, output).await
+        }
         CycleCommands::Update {
             id,
             name,

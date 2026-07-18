@@ -1416,12 +1416,24 @@ fn test_sprint_alias() {
 
 #[test]
 fn test_sprint_status_requires_team() {
+    // Without default-team / LINEAR_CLI_TEAM, sprint status still fails.
     let (code, _stdout, stderr) = run_cli(&["sprint", "status"]);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("--team") || stderr.contains("required"),
-        "sprint status should require --team flag"
+        stderr.contains("--team")
+            || stderr.contains("required")
+            || stderr.contains("default-team")
+            || stderr.contains("default team"),
+        "sprint status should require team or default-team: {}",
+        stderr
     );
+}
+
+fn team_required_error(stderr: &str) -> bool {
+    stderr.contains("--team")
+        || stderr.contains("required")
+        || stderr.contains("default-team")
+        || stderr.contains("default team")
 }
 
 #[test]
@@ -1429,8 +1441,9 @@ fn test_sprint_progress_requires_team() {
     let (code, _stdout, stderr) = run_cli(&["sprint", "progress"]);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("--team") || stderr.contains("required"),
-        "sprint progress should require --team flag"
+        team_required_error(&stderr),
+        "sprint progress should require team or default-team: {}",
+        stderr
     );
 }
 
@@ -1439,8 +1452,9 @@ fn test_sprint_plan_requires_team() {
     let (code, _stdout, stderr) = run_cli(&["sprint", "plan"]);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("--team") || stderr.contains("required"),
-        "sprint plan should require --team flag"
+        team_required_error(&stderr),
+        "sprint plan should require team or default-team: {}",
+        stderr
     );
 }
 
@@ -1449,8 +1463,9 @@ fn test_sprint_carry_over_requires_team() {
     let (code, _stdout, stderr) = run_cli(&["sprint", "carry-over"]);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("--team") || stderr.contains("required"),
-        "sprint carry-over should require --team flag"
+        team_required_error(&stderr),
+        "sprint carry-over should require team or default-team: {}",
+        stderr
     );
 }
 

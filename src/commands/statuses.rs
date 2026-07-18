@@ -23,25 +23,25 @@ pub enum StatusCommands {
     /// List all issue statuses for a team
     #[command(alias = "ls")]
     List {
-        /// Team name or ID
+        /// Team name or ID (falls back to default-team / LINEAR_CLI_TEAM)
         #[arg(short, long)]
-        team: String,
+        team: Option<String>,
     },
     /// Get details of a specific status
     Get {
         /// Status name(s) or ID(s). Use "-" to read from stdin.
         ids: Vec<String>,
-        /// Team name or ID
+        /// Team name or ID (falls back to default-team / LINEAR_CLI_TEAM)
         #[arg(short, long)]
-        team: String,
+        team: Option<String>,
     },
     /// Update a workflow state
     Update {
         /// Status name or ID
         id: String,
-        /// Team name or ID
+        /// Team name or ID (falls back to default-team / LINEAR_CLI_TEAM)
         #[arg(short, long)]
-        team: String,
+        team: Option<String>,
         /// New name
         #[arg(short, long)]
         name: Option<String>,
@@ -73,8 +73,12 @@ struct StatusRow {
 
 pub async fn handle(cmd: StatusCommands, output: &OutputOptions) -> Result<()> {
     match cmd {
-        StatusCommands::List { team } => list_statuses(&team, output).await,
+        StatusCommands::List { team } => {
+            let team = crate::config::require_team(team)?;
+            list_statuses(&team, output).await
+        }
         StatusCommands::Get { ids, team } => {
+            let team = crate::config::require_team(team)?;
             let final_ids = read_ids_from_stdin(ids);
             if final_ids.is_empty() {
                 anyhow::bail!(
@@ -91,6 +95,7 @@ pub async fn handle(cmd: StatusCommands, output: &OutputOptions) -> Result<()> {
             description,
             dry_run,
         } => {
+            let team = crate::config::require_team(team)?;
             let dry_run = dry_run || output.dry_run;
             update_status(&id, &team, name, color, description, dry_run, output).await
         }

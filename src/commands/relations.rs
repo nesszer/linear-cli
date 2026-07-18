@@ -358,23 +358,12 @@ async fn add_relation(
     if output.is_json() {
         print_json(&result["data"]["issueRelationCreate"], output)?;
     } else {
-        let rel = &result["data"]["issueRelationCreate"]["issueRelation"];
-        // Show the user's from/to order and relation name (blocked-by is sugar).
-        let from_id = if relation.is_inverted() {
-            rel["relatedIssue"]["identifier"].as_str().unwrap_or(from)
-        } else {
-            rel["issue"]["identifier"].as_str().unwrap_or(from)
-        };
-        let to_id = if relation.is_inverted() {
-            rel["issue"]["identifier"].as_str().unwrap_or(to)
-        } else {
-            rel["relatedIssue"]["identifier"].as_str().unwrap_or(to)
-        };
+        // Keep the user's argument order; blocked-by is sugar over inverted blocks.
         println!(
             "Created relation: {} {} {}",
-            from_id,
+            from,
             relation.display_name(),
-            to_id
+            to
         );
     }
 

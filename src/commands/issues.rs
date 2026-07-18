@@ -383,7 +383,7 @@ pub async fn handle(
                 .or(tpl.team.clone())
                 .or(data_team)
                 .or(data_team_id)
-                .or_else(crate::config::get_default_team)
+                .or_else(|| crate::config::resolve_team_arg(None))
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "--team is required (or set a default: linear config set default-team TEAM, or use a template with a default team)"
