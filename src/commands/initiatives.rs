@@ -5,7 +5,7 @@ use tabled::{Table, Tabled};
 
 use crate::api::LinearClient;
 use crate::output::{print_json, print_json_owned, OutputOptions};
-use crate::pagination::PaginationOptions;
+use crate::pagination::{paginate_nodes, PaginationOptions};
 use crate::text::truncate;
 use crate::types::Initiative;
 use crate::DISPLAY_OPTIONS;
@@ -79,7 +79,7 @@ pub async fn handle(
 ) -> Result<()> {
     match cmd {
         InitiativeCommands::List => list_initiatives(output, pagination).await,
-        InitiativeCommands::Get { id } => get_initiative(&id, output).await,
+        InitiativeCommands::Get { id } => get_initiative(&id, output, pagination).await,
         InitiativeCommands::Create {
             name,
             description,
@@ -171,9 +171,17 @@ async fn list_initiatives(output: &OutputOptions, pagination: &PaginationOptions
     Ok(())
 }
 
-async fn get_initiative(id: &str, output: &OutputOptions) -> Result<()> {
+async fn get_initiative(
+    id: &str,
+    output: &OutputOptions,
+    pagination: &PaginationOptions,
+) -> Result<()> {
     let client = LinearClient::new()?;
 
+    // Fetch the initiative's scalar fields first. The nested `projects`
+    // connection is fetched separately below because a plain `projects { nodes }`
+    // selection is silently capped by the API at 50 with no pagination — an
+    // initiative with more than 50 projects would report a truncated first page.
     let query = r#"
         query($id: String!) {
             initiative(id: $id) {
@@ -184,14 +192,6 @@ async fn get_initiative(id: &str, output: &OutputOptions) -> Result<()> {
                 sortOrder
                 createdAt
                 updatedAt
-                projects {
-                    nodes {
-                        id
-                        name
-                        state
-                        progress
-                    }
-                }
             }
         }
     "#;
@@ -202,8 +202,56 @@ async fn get_initiative(id: &str, output: &OutputOptions) -> Result<()> {
     if initiative.is_null() {
         anyhow::bail!("Initiative not found: {}", id);
     }
+    let mut initiative = initiative.clone();
 
-    print_json(initiative, output)?;
+    // Page through every project in the initiative. A single-initiative detail
+    // view should return the full membership, so default to fetching all pages
+    // while still honoring an explicit `--limit` / `--all` if the user set one.
+    let projects_query = r#"
+        query($id: String!, $first: Int, $after: String) {
+            initiative(id: $id) {
+                projects(first: $first, after: $after) {
+                    nodes {
+                        id
+                        name
+                        state
+                        progress
+                    }
+                    pageInfo {
+                        hasNextPage
+                        endCursor
+                    }
+                }
+            }
+        }
+    "#;
+
+    let mut vars = serde_json::Map::new();
+    vars.insert("id".to_string(), json!(id));
+
+    let projects_pagination = if pagination.limit.is_none() && !pagination.all {
+        PaginationOptions {
+            all: true,
+            ..pagination.clone()
+        }
+    } else {
+        pagination.clone()
+    };
+
+    let projects = paginate_nodes(
+        &client,
+        projects_query,
+        vars,
+        &["data", "initiative", "projects", "nodes"],
+        &["data", "initiative", "projects", "pageInfo"],
+        &projects_pagination,
+        100,
+    )
+    .await?;
+
+    initiative["projects"] = json!({ "nodes": projects });
+
+    print_json(&initiative, output)?;
     Ok(())
 }
 
