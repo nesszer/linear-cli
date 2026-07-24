@@ -23,6 +23,18 @@ impl PaginationOptions {
         options
     }
 
+    /// The dual of [`with_default_limit`]: an unbounded request (no `--limit`,
+    /// no `--all`) is upgraded to fetch every page. Used by detail views that
+    /// should return a full nested connection rather than the API's default
+    /// first page. An explicit `--limit` / `--all` is passed through untouched.
+    pub fn with_default_all(&self) -> Self {
+        let mut options = self.clone();
+        if !options.all && options.limit.is_none() {
+            options.all = true;
+        }
+        options
+    }
+
     pub fn effective_page_size(&self, default_page_size: usize) -> usize {
         self.page_size.unwrap_or(default_page_size).max(1)
     }
@@ -323,6 +335,53 @@ mod tests {
         };
         let result = opts.with_default_limit(50);
         assert!(result.limit.is_none());
+    }
+
+    #[test]
+    fn test_with_default_all_sets_all_when_unbounded() {
+        // No --limit and no --all: upgrade to fetch every page (detail-view
+        // default — this is the projects-truncation fix).
+        let opts = PaginationOptions::default();
+        let result = opts.with_default_all();
+        assert!(result.all);
+        assert!(result.limit.is_none());
+    }
+
+    #[test]
+    fn test_with_default_all_preserves_explicit_limit() {
+        // An explicit --limit is a deliberate cap; don't upgrade it to all.
+        let opts = PaginationOptions {
+            limit: Some(10),
+            ..Default::default()
+        };
+        let result = opts.with_default_all();
+        assert!(!result.all);
+        assert_eq!(result.limit, Some(10));
+    }
+
+    #[test]
+    fn test_with_default_all_preserves_explicit_all() {
+        let opts = PaginationOptions {
+            all: true,
+            ..Default::default()
+        };
+        let result = opts.with_default_all();
+        assert!(result.all);
+        assert!(result.limit.is_none());
+    }
+
+    #[test]
+    fn test_with_default_all_carries_through_cursor_and_page_size() {
+        // Other pagination fields ride along when we upgrade to all.
+        let opts = PaginationOptions {
+            after: Some("cursor".to_string()),
+            page_size: Some(25),
+            ..Default::default()
+        };
+        let result = opts.with_default_all();
+        assert!(result.all);
+        assert_eq!(result.after.as_deref(), Some("cursor"));
+        assert_eq!(result.page_size, Some(25));
     }
 
     #[test]
