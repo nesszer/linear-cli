@@ -229,7 +229,7 @@ async fn create_issues(
             );
             if let Some(ref desc) = row.description {
                 let preview = if desc.len() > 80 {
-                    format!("{}...", &desc.chars().take(80).collect::<String>())
+                    format!("{}...", desc.chars().take(80).collect::<String>())
                 } else {
                     desc.clone()
                 };

@@ -347,7 +347,7 @@ fn create_template(
         || team.is_some();
 
     if has_flag_values || output.is_json() || output.has_template() || output.dry_run {
-        let default_priority = default_priority.and_then(|p| if p == 0 { None } else { Some(p) });
+        let default_priority = default_priority.filter(|&p| p != 0);
         let default_labels: Vec<String> = labels
             .into_iter()
             .map(|s| s.trim().to_string())
