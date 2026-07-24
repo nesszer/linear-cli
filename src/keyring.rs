@@ -93,12 +93,14 @@ fn delete_secret(service: &str, profile: &str) -> Result<()> {
     match entry.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => {
-            // Some backends (notably Linux keyutils) error with a platform code
-            // instead of NoEntry when nothing is stored. Treat "already gone" as success.
+            // Some backends (notably Linux keyutils in headless/CI sandboxes) report a
+            // platform error instead of NoEntry when nothing is stored. If we cannot
+            // confirm a secret actually exists, there is nothing to delete, so treat
+            // it as success — matching delete_key's "Ok even if no key was stored".
             match entry.get_password() {
-                Err(keyring::Error::NoEntry) => Ok(()),
-                _ => Err(e)
+                Ok(_) => Err(e)
                     .with_context(|| format!("Failed to delete secret from {}", backend_name())),
+                Err(_) => Ok(()),
             }
         }
     }

@@ -20,8 +20,8 @@ fn create_private_file(path: &Path) -> Result<std::fs::File> {
 
 #[cfg(not(unix))]
 fn create_private_file(path: &Path) -> Result<std::fs::File> {
-    Ok(std::fs::File::create(path)
-        .with_context(|| format!("Failed to create file: {}", path.display()))?)
+    std::fs::File::create(path)
+        .with_context(|| format!("Failed to create file: {}", path.display()))
 }
 
 fn atomic_temp_path(path: &Path) -> Result<PathBuf> {
