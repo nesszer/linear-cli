@@ -1162,9 +1162,7 @@ async fn run_command(
         Commands::Templates { action } => templates::handle(action, output).await?,
         Commands::Time { action } => time::handle(action, output).await?,
         Commands::Uploads { action } => uploads::handle(action).await?,
-        Commands::Interactive { team } => {
-            interactive::run(config::resolve_team_arg(team)).await?
-        }
+        Commands::Interactive { team } => interactive::run(config::resolve_team_arg(team)).await?,
         Commands::Context => handle_context(output, agent_opts, retry).await?,
         Commands::Favorites { action } => favorites::handle(action, output).await?,
         Commands::Roadmaps { action } => {
@@ -1592,31 +1590,11 @@ mod tests {
 
     #[test]
     fn test_should_use_pager_disabled_for_interactive_commands() {
-        assert!(!should_use_pager(
-            false,
-            &OutputFormat::Table,
-            false,
-            true
-        ));
+        assert!(!should_use_pager(false, &OutputFormat::Table, false, true));
         // Non-interactive table on TTY would still depend on is_terminal; quiet/json off.
-        assert!(!should_use_pager(
-            true,
-            &OutputFormat::Table,
-            false,
-            false
-        ));
-        assert!(!should_use_pager(
-            false,
-            &OutputFormat::Json,
-            false,
-            false
-        ));
-        assert!(!should_use_pager(
-            false,
-            &OutputFormat::Table,
-            true,
-            false
-        ));
+        assert!(!should_use_pager(true, &OutputFormat::Table, false, false));
+        assert!(!should_use_pager(false, &OutputFormat::Json, false, false));
+        assert!(!should_use_pager(false, &OutputFormat::Table, true, false));
     }
 
     #[test]

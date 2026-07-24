@@ -70,9 +70,7 @@ fn get_secret(service: &str, profile: &str, fallback_label: &str) -> Result<Opti
         }
         Err(e) => {
             if !crate::output::is_quiet() {
-                eprintln!(
-                    "Warning: Keyring error ({e}), falling back to {fallback_label}"
-                );
+                eprintln!("Warning: Keyring error ({e}), falling back to {fallback_label}");
             }
             Ok(None)
         }
@@ -95,7 +93,9 @@ fn delete_secret(service: &str, profile: &str) -> Result<()> {
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("Failed to delete secret from {}", backend_name())),
+        Err(e) => {
+            Err(e).with_context(|| format!("Failed to delete secret from {}", backend_name()))
+        }
     }
 }
 
@@ -123,7 +123,10 @@ pub fn is_available() -> bool {
             if is_mock_entry(&entry) {
                 return false;
             }
-            !matches!(entry.get_password(), Err(keyring::Error::NoStorageAccess(_)))
+            !matches!(
+                entry.get_password(),
+                Err(keyring::Error::NoStorageAccess(_))
+            )
         }
         Err(_) => false,
     }
