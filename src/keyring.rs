@@ -1,123 +1,155 @@
 //! Secure API key storage using OS keyring.
 //!
 //! This module provides cross-platform credential storage:
-//! - macOS: Keychain
-//! - Windows: Credential Manager
-//! - Linux: Secret Service (requires D-Bus and a keyring daemon)
+//! - macOS: Keychain (`apple-native`)
+//! - Windows: Credential Manager (`windows-native`)
+//! - Linux: keyutils + Secret Service (`linux-native-sync-persistent`)
+//!
+//! keyring 3.x has no default platform backends. Without those features it
+//! silently uses an in-memory mock store — see issue #33.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 const SERVICE_NAME: &str = "linear-cli";
+const OAUTH_SERVICE_NAME: &str = "linear-cli-oauth";
 
-/// Get an API key from the keyring for a profile.
-/// Returns Ok(None) if no key is stored, Ok(Some(key)) if found.
-pub fn get_key(profile: &str) -> Result<Option<String>> {
-    let entry =
-        keyring::Entry::new(SERVICE_NAME, profile).context("Failed to create keyring entry")?;
+fn entry(service: &str, profile: &str) -> Result<keyring::Entry> {
+    keyring::Entry::new(service, profile).context("Failed to create keyring entry")
+}
+
+fn is_mock_entry(entry: &keyring::Entry) -> bool {
+    entry
+        .get_credential()
+        .downcast_ref::<keyring::mock::MockCredential>()
+        .is_some()
+}
+
+/// Human-readable name of the expected OS backend on this target.
+pub fn backend_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macOS Keychain"
+    } else if cfg!(target_os = "windows") {
+        "Windows Credential Manager"
+    } else if cfg!(target_os = "linux") {
+        "Linux keyutils + Secret Service"
+    } else {
+        "platform credential store"
+    }
+}
+
+/// Reject keyring's in-memory mock backend (non-persistent).
+fn require_persistent_backend() -> Result<()> {
+    let probe = entry(SERVICE_NAME, "__linear_cli_backend_probe__")?;
+    if is_mock_entry(&probe) {
+        bail!(
+            "secure-storage is using keyring's in-memory mock backend instead of {backend}. \
+             Credentials will not persist. Rebuild with `--features secure-storage` after \
+             enabling keyring platform features (apple-native, windows-native, \
+             linux-native-sync-persistent).",
+            backend = backend_name()
+        );
+    }
+    Ok(())
+}
+
+fn get_secret(service: &str, profile: &str, fallback_label: &str) -> Result<Option<String>> {
+    let entry = entry(service, profile)?;
+    if is_mock_entry(&entry) {
+        // Treat mock as missing so auth falls through; writes must call require_persistent_backend.
+        return Ok(None);
+    }
 
     match entry.get_password() {
         Ok(password) => Ok(Some(password)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(keyring::Error::NoStorageAccess(_)) => {
             if !crate::output::is_quiet() {
-                eprintln!("Warning: Keyring not available, falling back to config file");
+                eprintln!("Warning: Keyring not available, falling back to {fallback_label}");
             }
             Ok(None)
         }
         Err(e) => {
             if !crate::output::is_quiet() {
-                eprintln!(
-                    "Warning: Keyring error ({}), falling back to config file",
-                    e
-                );
+                eprintln!("Warning: Keyring error ({e}), falling back to {fallback_label}");
             }
             Ok(None)
         }
     }
 }
 
+fn set_secret(service: &str, profile: &str, secret: &str) -> Result<()> {
+    require_persistent_backend()?;
+    entry(service, profile)?
+        .set_password(secret)
+        .with_context(|| format!("Failed to store secret in {}", backend_name()))?;
+    Ok(())
+}
+
+fn delete_secret(service: &str, profile: &str) -> Result<()> {
+    let entry = entry(service, profile)?;
+    if is_mock_entry(&entry) {
+        return Ok(());
+    }
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => {
+            // Some backends (notably Linux keyutils) error with a platform code
+            // instead of NoEntry when nothing is stored. Treat "already gone" as success.
+            match entry.get_password() {
+                Err(keyring::Error::NoEntry) => Ok(()),
+                _ => Err(e)
+                    .with_context(|| format!("Failed to delete secret from {}", backend_name())),
+            }
+        }
+    }
+}
+
+/// Get an API key from the keyring for a profile.
+/// Returns Ok(None) if no key is stored, Ok(Some(key)) if found.
+pub fn get_key(profile: &str) -> Result<Option<String>> {
+    get_secret(SERVICE_NAME, profile, "config file")
+}
+
 /// Store an API key in the keyring for a profile.
 pub fn set_key(profile: &str, api_key: &str) -> Result<()> {
-    let entry =
-        keyring::Entry::new(SERVICE_NAME, profile).context("Failed to create keyring entry")?;
-
-    entry
-        .set_password(api_key)
-        .context("Failed to store API key in keyring")?;
-
-    Ok(())
+    set_secret(SERVICE_NAME, profile, api_key)
 }
 
 /// Delete an API key from the keyring for a profile.
 /// Returns Ok(()) even if no key was stored.
 pub fn delete_key(profile: &str) -> Result<()> {
-    let entry =
-        keyring::Entry::new(SERVICE_NAME, profile).context("Failed to create keyring entry")?;
-
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()), // Already gone, that's fine
-        Err(e) => Err(e).context("Failed to delete API key from keyring"),
-    }
+    delete_secret(SERVICE_NAME, profile)
 }
 
-/// Check if keyring is available on this system.
+/// Check if a durable OS keyring backend is available.
 pub fn is_available() -> bool {
-    // Try to create an entry and check if we can access it
-    match keyring::Entry::new(SERVICE_NAME, "__test__") {
+    match entry(SERVICE_NAME, "__test__") {
         Ok(entry) => {
-            // Try a non-destructive operation
-            match entry.get_password() {
-                Err(keyring::Error::NoStorageAccess(_)) => false,
-                _ => true, // NoEntry or Ok means storage is accessible
+            if is_mock_entry(&entry) {
+                return false;
             }
+            !matches!(
+                entry.get_password(),
+                Err(keyring::Error::NoStorageAccess(_))
+            )
         }
         Err(_) => false,
     }
 }
 
-const OAUTH_SERVICE_NAME: &str = "linear-cli-oauth";
-
 /// Get OAuth tokens JSON from keyring for a profile
 pub fn get_oauth_tokens(profile: &str) -> Result<Option<String>> {
-    let entry = keyring::Entry::new(OAUTH_SERVICE_NAME, profile)
-        .context("Failed to create keyring entry")?;
-
-    match entry.get_password() {
-        Ok(json) => Ok(Some(json)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(keyring::Error::NoStorageAccess(_)) => Ok(None),
-        Err(e) => {
-            if !crate::output::is_quiet() {
-                eprintln!(
-                    "Warning: Keyring OAuth error ({}), falling back to config",
-                    e
-                );
-            }
-            Ok(None)
-        }
-    }
+    get_secret(OAUTH_SERVICE_NAME, profile, "config")
 }
 
 /// Store OAuth tokens JSON in keyring for a profile
 pub fn set_oauth_tokens(profile: &str, json: &str) -> Result<()> {
-    let entry = keyring::Entry::new(OAUTH_SERVICE_NAME, profile)
-        .context("Failed to create keyring entry")?;
-    entry
-        .set_password(json)
-        .context("Failed to store OAuth tokens in keyring")?;
-    Ok(())
+    set_secret(OAUTH_SERVICE_NAME, profile, json)
 }
 
 /// Delete OAuth tokens from keyring for a profile
 pub fn delete_oauth_tokens(profile: &str) -> Result<()> {
-    let entry = keyring::Entry::new(OAUTH_SERVICE_NAME, profile)
-        .context("Failed to create keyring entry")?;
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(e).context("Failed to delete OAuth tokens from keyring"),
-    }
+    delete_secret(OAUTH_SERVICE_NAME, profile)
 }
 
 #[cfg(test)]
@@ -128,10 +160,21 @@ mod tests {
     const TEST_KEY: &str = "lin_api_test_key_12345";
 
     #[test]
+    fn default_backend_is_not_mock() {
+        let probe = entry(SERVICE_NAME, "__backend_test__").expect("create probe entry");
+        assert!(
+            !is_mock_entry(&probe),
+            "secure-storage must not use keyring's mock backend; enable apple-native, windows-native, and linux-native-sync-persistent on the keyring dependency"
+        );
+    }
+
+    #[test]
     fn test_is_available() {
-        // Just check it doesn't panic - availability depends on system
-        let available = is_available();
-        println!("Keyring available: {}", available);
+        // Availability depends on OS services; mock must never count as available.
+        if is_mock_entry(&entry(SERVICE_NAME, "__test__").expect("probe")) {
+            assert!(!is_available());
+        }
+        let _ = is_available();
     }
 
     #[test]

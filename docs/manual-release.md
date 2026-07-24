@@ -86,22 +86,28 @@ Confirm crates.io shows `0.3.16` before moving on.
 
 ## Releasing `v0.3.17` and newer
 
-Current `master` uses `reqwest` with `rustls`, so the Linux aarch64 build no longer depends on target OpenSSL packages.
+Current `master` uses `reqwest` with `rustls`. Official binaries should build with
+`--features secure-storage` so Keychain / Credential Manager / Secret Service work.
+
+Linux builds need `libdbus-1-dev` (and `pkg-config`). For aarch64 cross builds, use the
+repo-root `Cross.toml` which installs `libdbus-1-dev:$CROSS_DEB_ARCH`.
 
 ### Local builds
 
 ```bash
-cargo build --release --target x86_64-unknown-linux-gnu
+sudo apt-get install -y libdbus-1-dev pkg-config   # Linux hosts only
+
+cargo build --release --features secure-storage --target x86_64-unknown-linux-gnu
 tar -C target/x86_64-unknown-linux-gnu/release -czf linear-cli-x86_64-unknown-linux-gnu.tar.gz linear-cli
 
-cross build --release --target aarch64-unknown-linux-gnu
+cross build --release --features secure-storage --target aarch64-unknown-linux-gnu
 tar -C target/aarch64-unknown-linux-gnu/release -czf linear-cli-aarch64-unknown-linux-gnu.tar.gz linear-cli
 
-cargo xwin build --release --target x86_64-pc-windows-msvc
+cargo xwin build --release --features secure-storage --target x86_64-pc-windows-msvc
 cd target/x86_64-pc-windows-msvc/release && 7z a ../../../linear-cli-x86_64-pc-windows-msvc.zip linear-cli.exe
 ```
 
-Build both Apple targets on a Mac with the same commands from the previous section.
+Build both Apple targets on a Mac with `--features secure-storage` as well.
 
 ### Publish first, then release
 

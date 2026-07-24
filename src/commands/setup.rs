@@ -75,10 +75,7 @@ pub async fn handle(output: &OutputOptions) -> Result<()> {
             if let Some(ref key) = saved_team {
                 config::set_default_team(Some(key))?;
                 println!("  Default team saved: {}", key);
-                println!(
-                    "  Tip: Override with -t {} or LINEAR_CLI_TEAM={}",
-                    key, key
-                );
+                println!("  Tip: Override with -t {} or LINEAR_CLI_TEAM={}", key, key);
             } else {
                 println!("  Invalid selection, skipping.");
             }

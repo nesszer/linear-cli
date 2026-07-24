@@ -806,9 +806,7 @@ mod tests {
             token_type: "Bearer".to_string(),
             scopes: vec!["read".to_string(), "write".to_string()],
         });
-        config
-            .workspaces
-            .insert("oauth-test".to_string(), oauth_ws);
+        config.workspaces.insert("oauth-test".to_string(), oauth_ws);
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: Config = toml::from_str(&toml_str).unwrap();
@@ -829,9 +827,10 @@ mod tests {
             current: Some("default".to_string()),
             ..Default::default()
         };
-        config
-            .workspaces
-            .insert("default".to_string(), Workspace::with_api_key("lin_api_key"));
+        config.workspaces.insert(
+            "default".to_string(),
+            Workspace::with_api_key("lin_api_key"),
+        );
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
         assert!(

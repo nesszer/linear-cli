@@ -37,7 +37,7 @@ chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 rand = "0.8"
 csv = "1"
-keyring = { version = "3", optional = true }
+keyring = { version = "3", optional = true, default-features = false, features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
 sha2 = "0.10"
 open = "5"
 url = "2"
