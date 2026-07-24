@@ -208,9 +208,9 @@ async fn get_initiative(
     // view should return the full membership, so default to fetching all pages
     // while still honoring an explicit `--limit` / `--all` if the user set one.
     let projects_query = r#"
-        query($id: String!, $first: Int, $after: String) {
+        query($id: String!, $first: Int, $after: String, $last: Int, $before: String) {
             initiative(id: $id) {
-                projects(first: $first, after: $after) {
+                projects(first: $first, after: $after, last: $last, before: $before) {
                     nodes {
                         id
                         name
@@ -220,6 +220,8 @@ async fn get_initiative(
                     pageInfo {
                         hasNextPage
                         endCursor
+                        hasPreviousPage
+                        startCursor
                     }
                 }
             }
@@ -229,15 +231,13 @@ async fn get_initiative(
     let mut vars = serde_json::Map::new();
     vars.insert("id".to_string(), json!(id));
 
-    let projects_pagination = projects_pagination(pagination);
-
     let projects = paginate_nodes(
         &client,
         projects_query,
         vars,
         &["data", "initiative", "projects", "nodes"],
         &["data", "initiative", "projects", "pageInfo"],
-        &projects_pagination,
+        &pagination.with_default_all(),
         100,
     )
     .await?;
@@ -246,21 +246,6 @@ async fn get_initiative(
 
     print_json(&initiative, output)?;
     Ok(())
-}
-
-/// Pagination options for the nested `projects` connection of a single
-/// initiative. A detail view should return the full project membership, so an
-/// unbounded request (no `--limit`, no `--all`) is upgraded to fetch every
-/// page; an explicit `--limit` / `--all` is passed through untouched.
-fn projects_pagination(pagination: &PaginationOptions) -> PaginationOptions {
-    if pagination.limit.is_none() && !pagination.all {
-        PaginationOptions {
-            all: true,
-            ..pagination.clone()
-        }
-    } else {
-        pagination.clone()
-    }
 }
 
 async fn create_initiative(
@@ -412,55 +397,3 @@ async fn delete_initiative(id: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn projects_pagination_defaults_to_all_when_unbounded() {
-        // No --limit and no --all: a detail view must return every project,
-        // not the API's default first page — this is the truncation bug fix.
-        let opts = PaginationOptions::default();
-        let result = projects_pagination(&opts);
-        assert!(result.all);
-        assert!(result.limit.is_none());
-    }
-
-    #[test]
-    fn projects_pagination_preserves_explicit_limit() {
-        // An explicit --limit is a deliberate cap; don't upgrade it to all.
-        let opts = PaginationOptions {
-            limit: Some(10),
-            ..Default::default()
-        };
-        let result = projects_pagination(&opts);
-        assert!(!result.all);
-        assert_eq!(result.limit, Some(10));
-    }
-
-    #[test]
-    fn projects_pagination_preserves_explicit_all() {
-        // Already all: passed through untouched.
-        let opts = PaginationOptions {
-            all: true,
-            ..Default::default()
-        };
-        let result = projects_pagination(&opts);
-        assert!(result.all);
-        assert!(result.limit.is_none());
-    }
-
-    #[test]
-    fn projects_pagination_carries_through_cursor_and_page_size() {
-        // Other pagination fields ride along when we upgrade to all.
-        let opts = PaginationOptions {
-            after: Some("cursor".to_string()),
-            page_size: Some(25),
-            ..Default::default()
-        };
-        let result = projects_pagination(&opts);
-        assert!(result.all);
-        assert_eq!(result.after.as_deref(), Some("cursor"));
-        assert_eq!(result.page_size, Some(25));
-    }
-}
