@@ -544,9 +544,14 @@ async fn oauth_login(
 
     #[cfg(feature = "secure-storage")]
     if secure {
-        config::save_oauth_config_secure(&profile, &oauth_config).context(
-            "Secure OAuth storage failed. On macOS, locally built or unsigned binaries may not be able to read back Keychain items. Try the official signed release or fall back to plain `linear-cli auth oauth`.",
-        )?;
+        config::save_oauth_config_secure(&profile, &oauth_config).with_context(|| {
+            format!(
+                "Secure OAuth storage failed using {}. \
+                 If this build is on keyring's mock backend, rebuild with platform keyring features. \
+                 On macOS Keychain only: unsigned local builds can also fail readback — try an official release or plain `linear-cli auth oauth`.",
+                crate::keyring::backend_name()
+            )
+        })?;
 
         if output.is_json() || output.has_template() {
             print_json_owned(

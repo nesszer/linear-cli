@@ -439,7 +439,7 @@ linear-cli auth revoke         # Revoke OAuth tokens
 linear-cli auth logout         # Remove stored credentials
 ```
 
-> On macOS, `--secure` works best with an official signed release binary. Locally built or frequently rebuilt CLI binaries can trigger repeated Keychain prompts and may fail keychain readback verification. If that happens, use plain `linear-cli auth oauth` or `LINEAR_API_KEY` instead.
+> `--secure` needs a build with `--features secure-storage` (enables OS backends: Keychain, Credential Manager, Secret Service). On macOS Keychain, unsigned local builds can still prompt repeatedly or fail readback — if that happens, use an official release, plain `linear-cli auth oauth`, or `LINEAR_API_KEY`.
 
 **Auth priority:** `LINEAR_API_KEY` env var > OS keyring > OAuth tokens > config file API key.
 
