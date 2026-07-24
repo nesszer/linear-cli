@@ -1,8 +1,12 @@
 name: Release
 
+# Dispatch-only release. Never auto-runs on tag/release so the shared
+# Blacksmith free tier is not consumed by surprise release builds. The
+# workflow stays local-by-default: an operator dispatches it after a manual
+# `cargo publish`. See docs/adr/0001-pr-check-blacksmith-local-release.md.
+
 on:
-  release:
-    types: [created]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -10,35 +14,39 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
+    # Budget gate: release only runs when not in `off` mode. `thin` still
+    # allows a manually dispatched release (operator intent), only PR Check
+    # honors `thin`.
+    if: vars.CI_BUDGET_MODE != 'off'
     permissions:
       contents: read
     strategy:
       matrix:
         include:
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            runner: blacksmith-4vcpu-windows-2025
             ext: .exe
           - target: x86_64-apple-darwin
-            os: macos-latest
+            runner: macos-latest
             ext: ""
           - target: aarch64-apple-darwin
-            os: macos-latest
+            runner: macos-latest
             ext: ""
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            runner: blacksmith-4vcpu-ubuntu-2404
             ext: ""
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            runner: blacksmith-4vcpu-ubuntu-2404
             ext: ""
             use_cross: true
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
       - name: Install Linux keyring build deps
         if: runner.os == 'Linux' && !matrix.use_cross
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -79,6 +87,7 @@ jobs:
     name: Upload Release Assets
     needs: build
     runs-on: ubuntu-latest
+    if: vars.CI_BUDGET_MODE != 'off'
     permissions:
       contents: write
 
@@ -96,6 +105,7 @@ jobs:
     name: Publish to crates.io
     needs: upload
     runs-on: ubuntu-latest
+    if: vars.CI_BUDGET_MODE != 'off'
     permissions:
       contents: read
 

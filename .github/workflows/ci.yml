@@ -1,31 +1,53 @@
 name: CI
 
+# Thin PR Check for the linear-cli repo. Runs only on Blacksmith's Linux pool
+# so the shared Blacksmith free tier is not burned by macOS/Windows builds.
+# See .github/CI.md and docs/adr/0001-pr-check-blacksmith-local-release.md for
+# why this is Linux-only and how the budget modes gate it.
+
 on:
   push:
     branches: [master, main]
+    paths-ignore:
+      - "docs/**"
+      - "skills/**"
+      - "**/*.md"
+      - "LICENSE"
   pull_request:
     branches: [master, main]
+    paths-ignore:
+      - "docs/**"
+      - "skills/**"
+      - "**/*.md"
+      - "LICENSE"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Test
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+  pr-check:
+    name: PR Check
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Budget mode gate:
+    #   normal (unset/empty) -> run
+    #   thin                  -> skip (Win-CodexBar priority)
+    #   off                   -> skip
+    if: vars.CI_BUDGET_MODE != 'off' && vars.CI_BUDGET_MODE != 'thin'
 
     steps:
       - uses: actions/checkout@v4
-      - name: Install Linux keyring build deps
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
+      - name: Install Linux keyring build deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -43,22 +65,3 @@ jobs:
       # secure-storage still compile.
       - name: Build without secure-storage
         run: cargo build --verbose
-
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Linux keyring build deps
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build release
-        run: cargo build --release --features secure-storage
