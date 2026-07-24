@@ -16,5 +16,5 @@ _Avoid_: "Blacksmith runners" without naming the shared-pool constraint; "the cl
 **Local Release**: The default way to release — an operator runs `cargo publish` and `gh release create/upload` by hand (see `docs/manual-release.md`). The dispatch-only `release.yml` is a fallback, not the primary path.
 _Avoid_: "manual release" interchangeably with the workflow; the workflow is "dispatch release".
 
-**Budget Mode**: The value of org/repo variable `CI_BUDGET_MODE` — `normal` (PR Check runs), `thin` (linear-cli PR Check skips so Win-CodexBar gets priority), `off` (all CI skips). Unset/empty is treated as `normal`. PR Check honors `thin`; a manually dispatched Release still runs in `thin` because the operator asked for it.
+**Budget Mode**: The value of org/repo variable `CI_BUDGET_MODE` — `normal` (PR Check runs), `thin` (the **entire** linear-cli PR Check job is skipped — not individual matrix legs — so Win-CodexBar gets priority), `off` (all CI skips). Unset/empty is treated as `normal`. PR Check honors `thin`; a manually dispatched Release still runs in `thin` because the operator asked for it. The intended share of the ~3000 free pool minutes/month is roughly 60 / 30 / 10 (Win-CodexBar / linear-cli / buffer) — a per-repo minute share, not calendar time spent in each mode.
 _Avoid_: "spend mode", "throttle".

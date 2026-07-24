@@ -19,14 +19,18 @@ Actions → Variables). Unset/empty is treated as `normal`.
 
 ## Intended split
 
-Across the shared repos the intended split is roughly **60 / 30 / 10**:
-- **60%** of time in `normal` — PR Check runs on every PR.
-- **30%** in `thin` — linear-cli defers so Win-CodexBar (the priority repo)
-  gets uninterrupted pool access.
-- **10%** in `off` — paused, e.g. during a pool freeze or investigation.
+The shared Blacksmith free tier is ~3000 runner-minutes/month. The intended
+share of that pool across repos is roughly **60 / 30 / 10**:
+- **~60%** → Win-CodexBar (the priority repo).
+- **~30%** → linear-cli.
+- **~10%** → buffer for spikes and overruns.
 
-This is a planning target, not a hard cap. Move to `thin` whenever Win-CodexBar
-has open PRs competing for the pool.
+This is a share of pool minutes per repo, **not** calendar time spent in each
+`CI_BUDGET_MODE`. The budget mode is the knob that holds linear-cli near its
+~30%: `thin` skips the **entire** linear-cli PR Check job (not individual
+matrix legs), and `off` pauses all of this repo's CI. It is a planning target,
+not a hard cap — move to `thin` whenever Win-CodexBar has open PRs competing
+for the pool.
 
 ## $0 spend alert
 
