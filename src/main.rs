@@ -988,7 +988,12 @@ async fn async_main() -> Result<i32> {
     };
 
     output::set_quiet_mode(
-        cli.quiet || matches!(cli.output, OutputFormat::Json | OutputFormat::Ndjson),
+        cli.quiet
+            || matches!(cli.output, OutputFormat::Json | OutputFormat::Ndjson)
+            // The hidden _complete command feeds shell completion; any stderr noise
+            // (e.g. keyring warnings on a keyless/headless box) corrupts the caller's
+            // 2>/dev/null contract, so keep it silent.
+            || matches!(cli.command, Commands::Complete { .. }),
     );
     set_yes_mode(cli.yes);
 
