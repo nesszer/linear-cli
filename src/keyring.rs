@@ -91,10 +91,15 @@ fn delete_secret(service: &str, profile: &str) -> Result<()> {
         return Ok(());
     }
     match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => {
-            Err(e).with_context(|| format!("Failed to delete secret from {}", backend_name()))
+            // Some backends (notably Linux keyutils) error with a platform code
+            // instead of NoEntry when nothing is stored. Treat "already gone" as success.
+            match entry.get_password() {
+                Err(keyring::Error::NoEntry) => Ok(()),
+                _ => Err(e)
+                    .with_context(|| format!("Failed to delete secret from {}", backend_name())),
+            }
         }
     }
 }
