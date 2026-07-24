@@ -38,7 +38,7 @@ pub fn backend_name() -> &'static str {
 }
 
 /// Reject keyring's in-memory mock backend (non-persistent).
-pub fn require_persistent_backend() -> Result<()> {
+fn require_persistent_backend() -> Result<()> {
     let probe = entry(SERVICE_NAME, "__linear_cli_backend_probe__")?;
     if is_mock_entry(&probe) {
         bail!(
