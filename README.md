@@ -363,10 +363,12 @@ linear-cli g pr LIN-123 --draft                  # Create GitHub PR
 linear-cli g review-url LIN-123                  # Linear review URL for the issue's PR
 ```
 
-`review-url` resolves `https://linear.app/<workspace>/review/<slug>` from the
-pull requests Linear has linked to the issue's agent sessions — the only place the
-API exposes a PR's review slug. A pull request opened outside that flow has no
-slug to resolve, so the command reports that and you use the GitHub PR URL.
+`review-url` reads the review URL from the issue's pull request notifications —
+the one public place a pull request is paired with its review page — and falls
+back to the pull requests linked to the issue's agent sessions. A pull request
+that has produced neither (a brand-new PR with no CI result, comment, or review
+activity yet) has nothing to resolve, and the command says so instead of guessing
+a URL.
 
 ### Import / Export
 
