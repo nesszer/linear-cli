@@ -1,12 +1,13 @@
 use anyhow::Result;
 use clap::{Subcommand, ValueEnum};
 use colored::Colorize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Command;
 
 use crate::api::LinearClient;
 use crate::display_options;
+use crate::output::{print_json, OutputOptions};
 use crate::text::truncate;
 use crate::vcs::{generate_branch_name, git_branch_exists, run_git_command, validate_branch_name};
 
@@ -82,6 +83,18 @@ pub enum GitCommands {
         #[arg(long, value_enum)]
         vcs: Option<Vcs>,
     },
+    /// Show the Linear review URL for an issue's pull request(s)
+    #[command(after_help = r#"EXAMPLES:
+    linear git review-url LIN-123               # Print the review URL(s)
+    linear g review-url LIN-123 -o json         # Include PR number, state, GitHub URL
+
+NOTE: The review URL is read from the issue's pull request notifications, falling
+back to the pull requests linked to its agent sessions. A pull request that has
+produced neither has no review URL to resolve."#)]
+    ReviewUrl {
+        /// Issue identifier (e.g., "LIN-123") or ID
+        issue: String,
+    },
     /// Create a GitHub PR from a Linear issue
     #[command(after_help = r#"EXAMPLES:
     linear git pr LIN-123                      # Create PR for issue
@@ -140,8 +153,9 @@ fn get_vcs(vcs_flag: Option<Vcs>) -> Result<Vcs> {
     }
 }
 
-pub async fn handle(cmd: GitCommands) -> Result<()> {
+pub async fn handle(cmd: GitCommands, output: &OutputOptions) -> Result<()> {
     match cmd {
+        GitCommands::ReviewUrl { issue } => show_review_url(&issue, output).await,
         GitCommands::Checkout { issue, branch, vcs } => {
             let vcs = get_vcs(vcs)?;
             checkout_issue(&issue, branch, vcs).await
@@ -165,6 +179,234 @@ pub async fn handle(cmd: GitCommands) -> Result<()> {
             web,
         } => create_pr(&issue, &base, draft, web).await,
     }
+}
+
+/// GitHub pull request URLs attached to an issue.
+///
+/// Linear links a pull request to an issue as a `github` attachment as soon as it
+/// detects the branch, so this covers every pull request of the issue — but the
+/// attachment carries no review slug, which is why the slug is looked up
+/// separately.
+fn attached_pr_urls(issue: &Value) -> Vec<String> {
+    let mut urls = Vec::new();
+    for node in issue["attachments"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        if node["sourceType"].as_str() != Some("github") {
+            continue;
+        }
+        if let Some(url) = node["url"].as_str().filter(|u| u.contains("/pull/")) {
+            if !urls.iter().any(|existing| existing == url) {
+                urls.push(url.to_string());
+            }
+        }
+    }
+    urls
+}
+
+/// Pick out the review URLs for `pr_urls` from a page of notifications.
+///
+/// A `PullRequestNotification` is the one public place that pairs a pull request
+/// with its Linear review URL, and it carries that URL whole (`review/<title
+/// slug>-<id>`) rather than requiring it to be assembled.
+fn review_entries_from_notifications(nodes: &[Value], pr_urls: &[String]) -> Vec<Value> {
+    let mut entries = Vec::new();
+    for node in nodes {
+        let pr = &node["pullRequest"];
+        let Some(pr_url) = pr["url"].as_str() else {
+            continue;
+        };
+        if !pr_urls.iter().any(|wanted| wanted == pr_url) {
+            continue;
+        }
+        let Some(review_url) = node["url"].as_str().filter(|u| !u.is_empty()) else {
+            continue;
+        };
+        // A comment notification points at an anchor within the review page
+        // (`…#comment-<id>`); the page itself is what a caller wants.
+        let review_url = review_url.split('#').next().unwrap_or(review_url);
+        entries.push(json!({
+            "reviewUrl": review_url,
+            "number": pr["number"],
+            "status": pr["status"],
+            "url": pr_url,
+            "title": pr["title"],
+        }));
+    }
+    entries
+}
+
+/// Merge review entries, keeping the first entry seen per pull request URL.
+fn merge_review_entries(entries: Vec<Value>) -> Vec<Value> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut merged = Vec::new();
+    for entry in entries {
+        let key = entry["url"].as_str().unwrap_or_default().to_string();
+        if !key.is_empty() && seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        merged.push(entry);
+    }
+    merged
+}
+
+/// Build review entries from the agent sessions attached to an issue.
+///
+/// This is the fallback for a pull request with no notification: an agent session
+/// exposes `PullRequest.slugId` directly, from which the review URL can be
+/// assembled. One pull request can be linked by several sessions, hence the
+/// de-duplication by slug.
+fn review_entries(url_key: &str, issue: &Value) -> Vec<Value> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut entries = Vec::new();
+
+    let sessions = issue["agentSessions"]["nodes"].as_array();
+    for session in sessions.into_iter().flatten() {
+        let links = session["pullRequests"]["nodes"].as_array();
+        for link in links.into_iter().flatten() {
+            let pr = &link["pullRequest"];
+            let Some(slug) = pr["slugId"].as_str().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            if seen.iter().any(|s| s == slug) {
+                continue;
+            }
+            seen.push(slug.to_string());
+            entries.push(json!({
+                "reviewUrl": format!("https://linear.app/{}/review/{}", url_key, slug),
+                "number": pr["number"],
+                "status": pr["status"],
+                "url": pr["url"],
+                "title": pr["title"],
+            }));
+        }
+    }
+
+    entries
+}
+
+/// How many pages of notifications `review-url` will read before giving up.
+///
+/// The notification feed has no server-side filter for pull requests, so it is
+/// walked newest-first; a pull request whose last notification is older than this
+/// falls through to the agent-session path.
+const REVIEW_NOTIFICATION_PAGES: usize = 5;
+
+/// Look up review URLs for `pr_urls` by walking the notification feed.
+async fn review_urls_via_notifications(
+    client: &LinearClient,
+    pr_urls: &[String],
+) -> Result<Vec<Value>> {
+    let query = r#"
+        query($after: String) {
+            notifications(first: 100, after: $after, includeArchived: true) {
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                    __typename
+                    ... on PullRequestNotification {
+                        url
+                        pullRequest { url number status title }
+                    }
+                }
+            }
+        }
+    "#;
+
+    let mut entries: Vec<Value> = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    for _ in 0..REVIEW_NOTIFICATION_PAGES {
+        let result = client
+            .query(query, Some(json!({ "after": cursor })))
+            .await?;
+        let page = &result["data"]["notifications"];
+        let nodes = page["nodes"].as_array().cloned().unwrap_or_default();
+
+        entries.extend(review_entries_from_notifications(&nodes, pr_urls));
+        entries = merge_review_entries(entries);
+
+        if entries.len() == pr_urls.len() || page["pageInfo"]["hasNextPage"] != json!(true) {
+            break;
+        }
+        cursor = page["pageInfo"]["endCursor"].as_str().map(str::to_string);
+    }
+
+    Ok(entries)
+}
+
+async fn show_review_url(issue_id: &str, output: &OutputOptions) -> Result<()> {
+    let client = LinearClient::new()?;
+
+    let query = r#"
+        query($id: String!) {
+            organization { urlKey }
+            issue(id: $id) {
+                identifier
+                attachments { nodes { url sourceType } }
+                agentSessions {
+                    nodes {
+                        pullRequests {
+                            nodes {
+                                pullRequest { slugId url number status title }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    "#;
+
+    let result = client.query(query, Some(json!({ "id": issue_id }))).await?;
+    let issue = &result["data"]["issue"];
+
+    if issue.is_null() {
+        anyhow::bail!("Issue not found: {}", issue_id);
+    }
+
+    let url_key = result["data"]["organization"]["urlKey"]
+        .as_str()
+        .unwrap_or_default();
+    let pr_urls = attached_pr_urls(issue);
+
+    // A notification carries the review URL whole; agent sessions only expose the
+    // slug to assemble one, so they are the fallback.
+    let mut entries = if pr_urls.is_empty() {
+        Vec::new()
+    } else {
+        review_urls_via_notifications(&client, &pr_urls).await?
+    };
+    entries.extend(review_entries(url_key, issue));
+    let entries = merge_review_entries(entries);
+
+    if entries.is_empty() {
+        anyhow::bail!(
+            "No review URL for {}: {}. Use the GitHub PR URL instead.",
+            issue["identifier"].as_str().unwrap_or(issue_id),
+            if pr_urls.is_empty() {
+                "no pull request is linked to this issue".to_string()
+            } else {
+                format!(
+                    "Linear exposes a review URL through pull request notifications, and none \
+                     of the {} linked pull request(s) has one in the last {} pages of the feed",
+                    pr_urls.len(),
+                    REVIEW_NOTIFICATION_PAGES
+                )
+            }
+        );
+    }
+
+    if output.is_json() || output.has_template() {
+        return print_json(&json!(entries), output);
+    }
+
+    for entry in &entries {
+        println!("{}", entry["reviewUrl"].as_str().unwrap_or_default());
+    }
+
+    Ok(())
 }
 
 async fn get_issue_info(issue_id: &str) -> Result<(String, String, String, String)> {
@@ -601,6 +843,153 @@ async fn create_pr(issue_id: &str, base: &str, draft: bool, web: bool) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn issue_with_sessions(sessions: Value) -> Value {
+        json!({ "identifier": "LIN-123", "agentSessions": { "nodes": sessions } })
+    }
+
+    fn pr_link(slug: &str, number: u64) -> Value {
+        json!({ "pullRequest": {
+            "slugId": slug,
+            "number": number,
+            "status": "open",
+            "url": format!("https://github.com/acme/app/pull/{}", number),
+            "title": "Fix the thing"
+        }})
+    }
+
+    #[test]
+    fn test_attached_pr_urls_keeps_github_pull_requests_only() {
+        let issue = json!({ "attachments": { "nodes": [
+            { "sourceType": "github", "url": "https://github.com/acme/app/pull/183" },
+            { "sourceType": "github", "url": "https://github.com/acme/app/pull/183" },
+            { "sourceType": "github", "url": "https://github.com/acme/app/issues/12" },
+            { "sourceType": "sentry", "url": "https://sentry.io/acme/app/pull/1" },
+            { "sourceType": "github", "url": "https://github.com/acme/app/pull/184" }
+        ]}});
+
+        assert_eq!(
+            attached_pr_urls(&issue),
+            vec![
+                "https://github.com/acme/app/pull/183",
+                "https://github.com/acme/app/pull/184"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_review_entries_from_notifications_uses_the_notification_url() {
+        let nodes = vec![
+            json!({
+                "__typename": "IssueNotification",
+                "url": "https://linear.app/acme/issue/LIN-1"
+            }),
+            json!({
+                "__typename": "PullRequestNotification",
+                "url": "https://linear.app/acme/review/fix-the-thing-72e2bba2372a",
+                "pullRequest": {
+                    "url": "https://github.com/acme/app/pull/183",
+                    "number": 183, "status": "open", "title": "Fix the thing"
+                }
+            }),
+            json!({
+                "__typename": "PullRequestNotification",
+                "url": "https://linear.app/acme/review/someone-elses-pr-aaaaaaaaaaaa",
+                "pullRequest": { "url": "https://github.com/acme/app/pull/999", "number": 999 }
+            }),
+        ];
+        let wanted = vec!["https://github.com/acme/app/pull/183".to_string()];
+
+        let entries = review_entries_from_notifications(&nodes, &wanted);
+
+        assert_eq!(entries.len(), 1, "only the requested pull request matches");
+        assert_eq!(
+            entries[0]["reviewUrl"], "https://linear.app/acme/review/fix-the-thing-72e2bba2372a",
+            "the notification's URL is used verbatim, not reassembled from the slug"
+        );
+        assert_eq!(entries[0]["number"], 183);
+    }
+
+    #[test]
+    fn test_review_entries_from_notifications_drops_a_comment_anchor() {
+        let nodes = vec![json!({
+            "__typename": "PullRequestNotification",
+            "url": "https://linear.app/acme/review/fix-the-thing-72e2bba2372a#comment-5f63aa7c",
+            "pullRequest": { "url": "https://github.com/acme/app/pull/183", "number": 183 }
+        })];
+        let wanted = vec!["https://github.com/acme/app/pull/183".to_string()];
+
+        let entries = review_entries_from_notifications(&nodes, &wanted);
+
+        assert_eq!(
+            entries[0]["reviewUrl"], "https://linear.app/acme/review/fix-the-thing-72e2bba2372a",
+            "a comment notification must still yield the review page URL"
+        );
+    }
+
+    #[test]
+    fn test_merge_review_entries_prefers_the_first_entry_per_pull_request() {
+        let merged = merge_review_entries(vec![
+            json!({ "url": "https://github.com/acme/app/pull/1", "reviewUrl": "from-notification" }),
+            json!({ "url": "https://github.com/acme/app/pull/1", "reviewUrl": "from-agent-session" }),
+            json!({ "url": "https://github.com/acme/app/pull/2", "reviewUrl": "other" }),
+        ]);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0]["reviewUrl"], "from-notification");
+        assert_eq!(merged[1]["reviewUrl"], "other");
+    }
+
+    #[test]
+    fn test_review_entries_builds_review_url_from_slug() {
+        let issue = issue_with_sessions(json!([
+            { "pullRequests": { "nodes": [pr_link("7ffd27854fd2", 183)] } }
+        ]));
+
+        let entries = review_entries("acme", &issue);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0]["reviewUrl"],
+            "https://linear.app/acme/review/7ffd27854fd2"
+        );
+        assert_eq!(entries[0]["number"], 183);
+        assert_eq!(entries[0]["url"], "https://github.com/acme/app/pull/183");
+    }
+
+    #[test]
+    fn test_review_entries_dedupes_a_pr_linked_by_several_sessions() {
+        let issue = issue_with_sessions(json!([
+            { "pullRequests": { "nodes": [pr_link("aaa111", 7)] } },
+            { "pullRequests": { "nodes": [pr_link("aaa111", 7), pr_link("bbb222", 8)] } }
+        ]));
+
+        let entries = review_entries("acme", &issue);
+
+        assert_eq!(entries.len(), 2, "the repeated pull request is listed once");
+        assert_eq!(
+            entries[0]["reviewUrl"],
+            "https://linear.app/acme/review/aaa111"
+        );
+        assert_eq!(
+            entries[1]["reviewUrl"],
+            "https://linear.app/acme/review/bbb222"
+        );
+    }
+
+    #[test]
+    fn test_review_entries_empty_without_sessions_or_slug() {
+        assert!(review_entries("acme", &issue_with_sessions(json!([]))).is_empty());
+
+        // A session with no linked pull request, and a link whose slug is missing or
+        // blank: all unresolvable, and none of them may produce a bogus URL.
+        let unresolvable = issue_with_sessions(json!([
+            { "pullRequests": { "nodes": [] } },
+            { "pullRequests": { "nodes": [{ "pullRequest": { "number": 1 } }] } },
+            { "pullRequests": { "nodes": [{ "pullRequest": { "slugId": "", "number": 2 } }] } }
+        ]));
+        assert!(review_entries("acme", &unresolvable).is_empty());
+    }
 
     #[test]
     fn test_generate_branch_name_simple() {

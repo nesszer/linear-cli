@@ -360,7 +360,15 @@ linear-cli g branch LIN-123                      # Show branch name
 linear-cli g create LIN-123                      # Create branch (no checkout)
 linear-cli g commits                             # Commits with Linear trailers (jj)
 linear-cli g pr LIN-123 --draft                  # Create GitHub PR
+linear-cli g review-url LIN-123                  # Linear review URL for the issue's PR
 ```
+
+`review-url` reads the review URL from the issue's pull request notifications —
+the one public place a pull request is paired with its review page — and falls
+back to the pull requests linked to the issue's agent sessions. A pull request
+that has produced neither (a brand-new PR with no CI result, comment, or review
+activity yet) has nothing to resolve, and the command says so instead of guessing
+a URL.
 
 ### Import / Export
 
