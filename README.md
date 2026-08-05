@@ -360,7 +360,13 @@ linear-cli g branch LIN-123                      # Show branch name
 linear-cli g create LIN-123                      # Create branch (no checkout)
 linear-cli g commits                             # Commits with Linear trailers (jj)
 linear-cli g pr LIN-123 --draft                  # Create GitHub PR
+linear-cli g review-url LIN-123                  # Linear review URL for the issue's PR
 ```
+
+`review-url` resolves `https://linear.app/<workspace>/review/<slug>` from the
+pull requests Linear has linked to the issue's agent sessions — the only place the
+API exposes a PR's review slug. A pull request opened outside that flow has no
+slug to resolve, so the command reports that and you use the GitHub PR URL.
 
 ### Import / Export
 

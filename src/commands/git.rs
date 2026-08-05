@@ -1,12 +1,13 @@
 use anyhow::Result;
 use clap::{Subcommand, ValueEnum};
 use colored::Colorize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Command;
 
 use crate::api::LinearClient;
 use crate::display_options;
+use crate::output::{print_json, OutputOptions};
 use crate::text::truncate;
 use crate::vcs::{generate_branch_name, git_branch_exists, run_git_command, validate_branch_name};
 
@@ -82,6 +83,17 @@ pub enum GitCommands {
         #[arg(long, value_enum)]
         vcs: Option<Vcs>,
     },
+    /// Show the Linear review URL for an issue's pull request(s)
+    #[command(after_help = r#"EXAMPLES:
+    linear git review-url LIN-123               # Print the review URL(s)
+    linear g review-url LIN-123 -o json         # Include PR number, state, GitHub URL
+
+NOTE: Linear only exposes a pull request's review slug for PRs it has linked to
+an agent session, so a PR opened outside that flow has no review URL to resolve."#)]
+    ReviewUrl {
+        /// Issue identifier (e.g., "LIN-123") or ID
+        issue: String,
+    },
     /// Create a GitHub PR from a Linear issue
     #[command(after_help = r#"EXAMPLES:
     linear git pr LIN-123                      # Create PR for issue
@@ -140,8 +152,9 @@ fn get_vcs(vcs_flag: Option<Vcs>) -> Result<Vcs> {
     }
 }
 
-pub async fn handle(cmd: GitCommands) -> Result<()> {
+pub async fn handle(cmd: GitCommands, output: &OutputOptions) -> Result<()> {
     match cmd {
+        GitCommands::ReviewUrl { issue } => show_review_url(&issue, output).await,
         GitCommands::Checkout { issue, branch, vcs } => {
             let vcs = get_vcs(vcs)?;
             checkout_issue(&issue, branch, vcs).await
@@ -165,6 +178,94 @@ pub async fn handle(cmd: GitCommands) -> Result<()> {
             web,
         } => create_pr(&issue, &base, draft, web).await,
     }
+}
+
+/// Build the review entries for an issue from a `review-url` query response.
+///
+/// `PullRequest.slugId` is the only public field carrying the slug in a review
+/// URL, and it is reachable only through the agent sessions attached to an issue,
+/// so an issue can legitimately resolve to zero entries. One pull request can be
+/// linked by more than one session, hence the de-duplication by slug.
+fn review_entries(url_key: &str, issue: &Value) -> Vec<Value> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut entries = Vec::new();
+
+    let sessions = issue["agentSessions"]["nodes"].as_array();
+    for session in sessions.into_iter().flatten() {
+        let links = session["pullRequests"]["nodes"].as_array();
+        for link in links.into_iter().flatten() {
+            let pr = &link["pullRequest"];
+            let Some(slug) = pr["slugId"].as_str().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            if seen.iter().any(|s| s == slug) {
+                continue;
+            }
+            seen.push(slug.to_string());
+            entries.push(json!({
+                "reviewUrl": format!("https://linear.app/{}/review/{}", url_key, slug),
+                "number": pr["number"],
+                "status": pr["status"],
+                "url": pr["url"],
+                "title": pr["title"],
+            }));
+        }
+    }
+
+    entries
+}
+
+async fn show_review_url(issue_id: &str, output: &OutputOptions) -> Result<()> {
+    let client = LinearClient::new()?;
+
+    let query = r#"
+        query($id: String!) {
+            organization { urlKey }
+            issue(id: $id) {
+                identifier
+                agentSessions {
+                    nodes {
+                        pullRequests {
+                            nodes {
+                                pullRequest { slugId url number status title }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    "#;
+
+    let result = client.query(query, Some(json!({ "id": issue_id }))).await?;
+    let issue = &result["data"]["issue"];
+
+    if issue.is_null() {
+        anyhow::bail!("Issue not found: {}", issue_id);
+    }
+
+    let url_key = result["data"]["organization"]["urlKey"]
+        .as_str()
+        .unwrap_or_default();
+    let entries = review_entries(url_key, issue);
+
+    if entries.is_empty() {
+        anyhow::bail!(
+            "No review URL for {}: Linear exposes a pull request's review slug only \
+             for PRs linked to an agent session, and this issue has none. Use the \
+             GitHub PR URL instead.",
+            issue["identifier"].as_str().unwrap_or(issue_id)
+        );
+    }
+
+    if output.is_json() || output.has_template() {
+        return print_json(&json!(entries), output);
+    }
+
+    for entry in &entries {
+        println!("{}", entry["reviewUrl"].as_str().unwrap_or_default());
+    }
+
+    Ok(())
 }
 
 async fn get_issue_info(issue_id: &str) -> Result<(String, String, String, String)> {
@@ -601,6 +702,71 @@ async fn create_pr(issue_id: &str, base: &str, draft: bool, web: bool) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn issue_with_sessions(sessions: Value) -> Value {
+        json!({ "identifier": "LIN-123", "agentSessions": { "nodes": sessions } })
+    }
+
+    fn pr_link(slug: &str, number: u64) -> Value {
+        json!({ "pullRequest": {
+            "slugId": slug,
+            "number": number,
+            "status": "open",
+            "url": format!("https://github.com/acme/app/pull/{}", number),
+            "title": "Fix the thing"
+        }})
+    }
+
+    #[test]
+    fn test_review_entries_builds_review_url_from_slug() {
+        let issue = issue_with_sessions(json!([
+            { "pullRequests": { "nodes": [pr_link("7ffd27854fd2", 183)] } }
+        ]));
+
+        let entries = review_entries("acme", &issue);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0]["reviewUrl"],
+            "https://linear.app/acme/review/7ffd27854fd2"
+        );
+        assert_eq!(entries[0]["number"], 183);
+        assert_eq!(entries[0]["url"], "https://github.com/acme/app/pull/183");
+    }
+
+    #[test]
+    fn test_review_entries_dedupes_a_pr_linked_by_several_sessions() {
+        let issue = issue_with_sessions(json!([
+            { "pullRequests": { "nodes": [pr_link("aaa111", 7)] } },
+            { "pullRequests": { "nodes": [pr_link("aaa111", 7), pr_link("bbb222", 8)] } }
+        ]));
+
+        let entries = review_entries("acme", &issue);
+
+        assert_eq!(entries.len(), 2, "the repeated pull request is listed once");
+        assert_eq!(
+            entries[0]["reviewUrl"],
+            "https://linear.app/acme/review/aaa111"
+        );
+        assert_eq!(
+            entries[1]["reviewUrl"],
+            "https://linear.app/acme/review/bbb222"
+        );
+    }
+
+    #[test]
+    fn test_review_entries_empty_without_sessions_or_slug() {
+        assert!(review_entries("acme", &issue_with_sessions(json!([]))).is_empty());
+
+        // A session with no linked pull request, and a link whose slug is missing or
+        // blank: all unresolvable, and none of them may produce a bogus URL.
+        let unresolvable = issue_with_sessions(json!([
+            { "pullRequests": { "nodes": [] } },
+            { "pullRequests": { "nodes": [{ "pullRequest": { "number": 1 } }] } },
+            { "pullRequests": { "nodes": [{ "pullRequest": { "slugId": "", "number": 2 } }] } }
+        ]));
+        assert!(review_entries("acme", &unresolvable).is_empty());
+    }
 
     #[test]
     fn test_generate_branch_name_simple() {

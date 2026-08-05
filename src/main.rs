@@ -1160,7 +1160,7 @@ async fn run_command(
         Commands::Search { action } => search::handle(action, output).await?,
         Commands::Sync { action } => sync::handle(action, output).await?,
         Commands::Statuses { action } => statuses::handle(action, output).await?,
-        Commands::Git { action } => git::handle(action).await?,
+        Commands::Git { action } => git::handle(action, output).await?,
         Commands::Bulk { action } => bulk::handle(action, output).await?,
         Commands::Cache { action } => commands::cache::handle(action).await?,
         Commands::Notifications { action } => notifications::handle(action, output).await?,
