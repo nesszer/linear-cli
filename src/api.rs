@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use futures::StreamExt;
 use reqwest::header::HeaderMap;
 use reqwest::redirect::Policy;
@@ -645,6 +645,31 @@ impl AuthState {
     }
 }
 
+/// Pick the auth to continue with after an OAuth refresh attempt failed.
+///
+/// A refresh token can be expired or revoked, in which case the cached grant is
+/// dead and cannot be revived without an interactive `auth oauth` flow. If an API
+/// key is configured, the CLI can still authenticate, so a dead grant must not be
+/// allowed to fail the command — that is what makes the CLI unusable in
+/// non-interactive environments (CI, containers, agents), where `LINEAR_API_KEY`
+/// is set precisely because no browser is available.
+fn auth_after_failed_refresh(api_key: Option<String>, refresh_error: Error) -> Result<AuthState> {
+    match api_key {
+        Some(key) if !key.trim().is_empty() => {
+            eprintln!(
+                "Warning: OAuth token refresh failed ({}); falling back to API key authentication.",
+                refresh_error
+            );
+            Ok(AuthState::ApiKey(key))
+        }
+        _ => Err(refresh_error.context(
+            "OAuth token refresh failed and no API key is configured. \
+             Re-authenticate with `linear-cli auth oauth`, or set LINEAR_API_KEY / run \
+             `linear-cli auth login --key <key>` for non-interactive use.",
+        )),
+    }
+}
+
 #[derive(Clone)]
 pub struct LinearClient {
     client: Client,
@@ -847,7 +872,18 @@ impl LinearClient {
                     .as_ref()
                     .context("OAuth token expired but no refresh token available")?;
 
-                let new_tokens = crate::oauth::refresh_tokens(client_id, refresh_token).await?;
+                let new_tokens = match crate::oauth::refresh_tokens(client_id, refresh_token).await
+                {
+                    Ok(tokens) => tokens,
+                    Err(e) => {
+                        // A cached grant that can no longer be refreshed must not mask a
+                        // usable API key (see `auth_after_failed_refresh`).
+                        let fallback = auth_after_failed_refresh(config::get_api_key().ok(), e)?;
+                        let header = fallback.auth_header();
+                        *auth = fallback;
+                        return Ok(header);
+                    }
+                };
 
                 // Persist the new tokens
                 let scopes = if let Ok(Some(existing)) = config::get_oauth_metadata(profile) {
@@ -1000,6 +1036,49 @@ mod tests {
         assert!(
             state.needs_refresh(),
             "OAuth with expired token and refresh token should need refresh"
+        );
+    }
+
+    #[test]
+    fn test_auth_after_failed_refresh_falls_back_to_api_key() {
+        let state = auth_after_failed_refresh(
+            Some("lin_api_key123".to_string()),
+            anyhow::anyhow!("Refresh token expired"),
+        )
+        .expect("a configured API key should be used when the refresh fails");
+
+        assert!(matches!(state, AuthState::ApiKey(_)));
+        assert_eq!(state.auth_header(), "lin_api_key123");
+        assert!(
+            !state.needs_refresh(),
+            "the fallback must not try to refresh again"
+        );
+    }
+
+    #[test]
+    fn test_auth_after_failed_refresh_without_api_key_reports_original_error() {
+        let err = auth_after_failed_refresh(None, anyhow::anyhow!("Refresh token expired"))
+            .expect_err("without an API key there is no way to authenticate");
+
+        let chain = format!("{:#}", err);
+        assert!(
+            chain.contains("Refresh token expired"),
+            "the underlying refresh error must survive: {chain}"
+        );
+        assert!(
+            chain.contains("LINEAR_API_KEY"),
+            "the message should point at the non-interactive fix: {chain}"
+        );
+    }
+
+    #[test]
+    fn test_auth_after_failed_refresh_ignores_blank_api_key() {
+        let result =
+            auth_after_failed_refresh(Some("   ".to_string()), anyhow::anyhow!("Refresh failed"));
+
+        assert!(
+            result.is_err(),
+            "a blank API key is not credentials and must not be used as a fallback"
         );
     }
 
