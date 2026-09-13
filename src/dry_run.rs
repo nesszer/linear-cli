@@ -75,7 +75,6 @@ pub(crate) fn unsupported_command(command: &Commands) -> Option<&'static str> {
                 projects::ProjectCommands::Update { .. }
                     | projects::ProjectCommands::List { .. }
                     | projects::ProjectCommands::Get { .. }
-                    | projects::ProjectCommands::Open { .. }
                     | projects::ProjectCommands::Members { .. }
             ) =>
         {
@@ -103,7 +102,6 @@ pub(crate) fn unsupported_command(command: &Commands) -> Option<&'static str> {
                     | crate::commands::issues::IssueCommands::Update { .. }
                     | crate::commands::issues::IssueCommands::List { .. }
                     | crate::commands::issues::IssueCommands::Get { .. }
-                    | crate::commands::issues::IssueCommands::Open { .. }
                     | crate::commands::issues::IssueCommands::Link { .. }
             ) =>
         {
@@ -138,6 +136,9 @@ pub(crate) fn unsupported_command(command: &Commands) -> Option<&'static str> {
         Commands::Api {
             action: crate::commands::api::ApiCommands::Mutate { .. },
         } => Some("api mutate"),
+        Commands::Api {
+            action: crate::commands::api::ApiCommands::Query { .. },
+        } => Some("api query"),
         Commands::Interactive { .. } => Some("interactive"),
         Commands::Git {
             action:
@@ -236,5 +237,37 @@ mod tests {
             action: teams::TeamCommands::List,
         };
         assert_eq!(unsupported_command(&command), None);
+    }
+
+    #[test]
+    fn browser_open_variants_are_rejected() {
+        let project = Commands::Projects {
+            action: projects::ProjectCommands::Open {
+                id: "project-id".to_string(),
+            },
+        };
+        let issue = Commands::Issues {
+            action: crate::commands::issues::IssueCommands::Open {
+                id: "LIN-1".to_string(),
+            },
+        };
+
+        assert_eq!(unsupported_command(&project), Some("projects"));
+        assert_eq!(unsupported_command(&issue), Some("issues"));
+    }
+
+    #[test]
+    fn raw_api_queries_are_rejected() {
+        let command = Commands::Api {
+            action: crate::commands::api::ApiCommands::Query {
+                query: Some("{ viewer { id } }".to_string()),
+                variables: vec![],
+                paginate: false,
+                nodes_path: String::new(),
+                page_info_path: String::new(),
+            },
+        };
+
+        assert_eq!(unsupported_command(&command), Some("api query"));
     }
 }

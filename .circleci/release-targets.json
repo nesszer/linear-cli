@@ -1,0 +1,49 @@
+{
+  "targets": [
+    {
+      "circleci_job": "build-linux-x86",
+      "target": "x86_64-unknown-linux-gnu",
+      "archive": "linear-cli-x86_64-unknown-linux-gnu.tar.gz",
+      "archive_type": "tar.gz",
+      "binary": "linear-cli",
+      "file_pattern": "ELF 64-bit.*x86-64",
+      "checks_version": true
+    },
+    {
+      "circleci_job": "build-linux-arm",
+      "target": "aarch64-unknown-linux-gnu",
+      "archive": "linear-cli-aarch64-unknown-linux-gnu.tar.gz",
+      "archive_type": "tar.gz",
+      "binary": "linear-cli",
+      "file_pattern": "ELF 64-bit.*(ARM aarch64|AArch64)",
+      "checks_version": false
+    },
+    {
+      "circleci_job": "build-windows-x86",
+      "target": "x86_64-pc-windows-msvc",
+      "archive": "linear-cli-x86_64-pc-windows-msvc.zip",
+      "archive_type": "zip",
+      "binary": "linear-cli.exe",
+      "file_pattern": "PE32\\+ executable.*x86-64",
+      "checks_version": false
+    },
+    {
+      "circleci_job": "build-macos-x86",
+      "target": "x86_64-apple-darwin",
+      "archive": "linear-cli-x86_64-apple-darwin.tar.gz",
+      "archive_type": "tar.gz",
+      "binary": "linear-cli",
+      "file_pattern": "Mach-O 64-bit.*x86_64",
+      "checks_version": false
+    },
+    {
+      "circleci_job": "build-macos-arm",
+      "target": "aarch64-apple-darwin",
+      "archive": "linear-cli-aarch64-apple-darwin.tar.gz",
+      "archive_type": "tar.gz",
+      "binary": "linear-cli",
+      "file_pattern": "Mach-O 64-bit.*(arm64|ARM64)",
+      "checks_version": false
+    }
+  ]
+}

@@ -11,15 +11,18 @@ version="${CIRCLE_TAG#v}"
 cargo_version="$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)"
 test "$cargo_version" = "$version"
 
-expected=(
-  linear-cli-x86_64-unknown-linux-gnu.tar.gz
-  linear-cli-aarch64-unknown-linux-gnu.tar.gz
-  linear-cli-x86_64-pc-windows-msvc.zip
-  linear-cli-x86_64-apple-darwin.tar.gz
-  linear-cli-aarch64-apple-darwin.tar.gz
-)
+target_specs_text="$(python3 .circleci/release_targets.py --tsv)"
+test -n "$target_specs_text"
+mapfile -t target_specs <<< "$target_specs_text"
+test "${#target_specs[@]}" -gt 0
+expected=()
+for spec in "${target_specs[@]}"; do
+  IFS=$'\t' read -r _ archive _ _ _ _ <<< "$spec"
+  expected+=("$archive")
+done
 mkdir -p release
-for archive in "${expected[@]}"; do
+for spec in "${target_specs[@]}"; do
+  IFS=$'\t' read -r _ archive _ _ _ _ <<< "$spec"
   found="$(find artifacts -type f -name "$archive" -print -quit)"
   test -n "$found"
   cp -- "$found" "release/$archive"
@@ -35,41 +38,28 @@ test "$actual_count" -eq "${#expected[@]}"
 command -v file >/dev/null
 extract_dir="$(mktemp -d)"
 trap 'rm -rf -- "$extract_dir"' EXIT
-for archive in "${expected[@]}"; do
-  target="${archive#linear-cli-}"
-  target="${target%.tar.gz}"
-  target="${target%.zip}"
+for spec in "${target_specs[@]}"; do
+  IFS=$'\t' read -r target archive archive_type binary file_pattern checks_version <<< "$spec"
   destination="$extract_dir/$target"
   mkdir -p "$destination"
-  if [[ "$archive" == *.tar.gz ]]; then
-    test "$(tar -tzf "release/$archive")" = "linear-cli"
+  if [[ "$archive_type" == "tar.gz" ]]; then
+    test "$(tar -tzf "release/$archive")" = "$binary"
     tar -xzf "release/$archive" -C "$destination"
-    binary="$destination/linear-cli"
-    test -x "$binary"
-    file_description="$(file -b "$binary")"
-    case "$archive" in
-      linear-cli-x86_64-unknown-linux-gnu.tar.gz)
-        grep -Eq 'ELF 64-bit.*x86-64' <<<"$file_description"
-        reported="$($binary --version)"
-        test "$reported" = "linear-cli $version"
-        ;;
-      linear-cli-aarch64-unknown-linux-gnu.tar.gz)
-        grep -Eq 'ELF 64-bit.*(ARM aarch64|AArch64)' <<<"$file_description"
-        ;;
-      linear-cli-x86_64-apple-darwin.tar.gz)
-        grep -Eq 'Mach-O 64-bit.*x86_64' <<<"$file_description"
-        ;;
-      linear-cli-aarch64-apple-darwin.tar.gz)
-        grep -Eq 'Mach-O 64-bit.*(arm64|ARM64)' <<<"$file_description"
-        ;;
-    esac
+    binary_path="$destination/$binary"
+    test -x "$binary_path"
+    file_description="$(file -b "$binary_path")"
+    grep -Eq "$file_pattern" <<<"$file_description"
+    if [[ "$checks_version" == "true" ]]; then
+      reported="$($binary_path --version)"
+      test "$reported" = "linear-cli $version"
+    fi
   else
-    test "$(unzip -Z1 "release/$archive" | tr -d '\r')" = "linear-cli.exe"
+    test "$(unzip -Z1 "release/$archive" | tr -d '\r')" = "$binary"
     unzip -q "release/$archive" -d "$destination"
-    binary="$destination/linear-cli.exe"
-    test -f "$binary"
-    file_description="$(file -b "$binary")"
-    grep -Eq 'PE32\+ executable.*x86-64' <<<"$file_description"
+    binary_path="$destination/$binary"
+    test -f "$binary_path"
+    file_description="$(file -b "$binary_path")"
+    grep -Eq "$file_pattern" <<<"$file_description"
   fi
 done
 

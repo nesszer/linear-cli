@@ -81,7 +81,12 @@ jobs:
             cargo fmt --all -- --check
       - run:
           name: Check release verifier shell syntax
-          command: bash -n .circleci/verify-release.sh
+          command: |
+            set -euo pipefail
+            bash -n .circleci/verify-release.sh
+            python3 -m py_compile .circleci/release_targets.py .circleci/release-manifest.py .circleci/publish-release.py .circleci/test_release_tools.py
+            python3 .circleci/release_targets.py --check-circleci-config .circleci/config.yml
+            python3 .circleci/test_release_tools.py
       - run:
           name: Run clippy with warnings denied
           command: |
@@ -240,6 +245,7 @@ jobs:
       - persist_to_workspace:
           root: .
           paths:
+            - artifacts
             - release
       - store_artifacts:
           path: release
@@ -253,13 +259,12 @@ jobs:
       - attach_workspace:
           at: .
       - run:
-          name: Upload verified assets to GitHub Release
+          name: Re-validate release assets before publication
+          command: bash .circleci/verify-release.sh
+      - run:
+          name: Install GitHub CLI
           command: |
             set -euo pipefail
-            : "${CIRCLE_TAG:?This job must run from a release tag}"
-            : "${gh_token:?Set gh_token in the gh-release-publisher context}"
-            export GH_TOKEN="$gh_token"
-            export GH_REPO="${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}"
             if ! command -v gh >/dev/null 2>&1; then
               type -p curl >/dev/null
               curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -270,23 +275,15 @@ jobs:
               sudo apt-get update
               sudo apt-get install -y gh
             fi
-            if gh release view "$CIRCLE_TAG" >/dev/null 2>&1; then
-              gh release upload "$CIRCLE_TAG" release/* --clobber
-            else
-              gh release create "$CIRCLE_TAG" release/* --verify-tag --title "$CIRCLE_TAG" --generate-notes
-            fi
-            expected=(
-              SHA256SUMS
-              release-manifest.json
-              linear-cli-x86_64-unknown-linux-gnu.tar.gz
-              linear-cli-aarch64-unknown-linux-gnu.tar.gz
-              linear-cli-x86_64-pc-windows-msvc.zip
-              linear-cli-x86_64-apple-darwin.tar.gz
-              linear-cli-aarch64-apple-darwin.tar.gz
-            )
-            actual="$(gh release view "$CIRCLE_TAG" --json assets --jq '.assets[].name' | sort)"
-            expected_sorted="$(printf '%s\n' "${expected[@]}" | sort)"
-            test "$actual" = "$expected_sorted"
+      - run:
+          name: Upload verified assets to GitHub Release
+          command: |
+            set -euo pipefail
+            : "${CIRCLE_TAG:?This job must run from a release tag}"
+            : "${gh_token:?Set gh_token in the gh-release-publisher context}"
+            export GH_TOKEN="$gh_token"
+            export GH_REPO="${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}"
+            python3 .circleci/publish-release.py
 
   verify-crate:
     machine:
@@ -337,6 +334,12 @@ workflows:
 
   release:
     jobs:
+      - test:
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^v[0-9]+\.[0-9]+\.[0-9]+$/
       - build-linux-x86:
           filters:
             branches:
@@ -369,6 +372,7 @@ workflows:
               only: /^v[0-9]+\.[0-9]+\.[0-9]+$/
       - verify-release:
           requires:
+            - test
             - build-linux-x86
             - build-linux-arm
             - build-macos-x86
@@ -381,6 +385,7 @@ workflows:
               only: /^v[0-9]+\.[0-9]+\.[0-9]+$/
       - publish-release:
           requires:
+            - test
             - verify-release
           context: gh-release-publisher
           filters:

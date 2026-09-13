@@ -61,8 +61,8 @@ pub async fn handle(cmd: ApiCommands, output: &OutputOptions) -> Result<()> {
             nodes_path,
             page_info_path,
         } => {
+            reject_unsupported_dry_run(output.dry_run, "api query")?;
             let resolved = resolve_query_source(query)?;
-            reject_mutation_document_for_dry_run(&resolved, output.dry_run)?;
             run_query(
                 &resolved,
                 &variables,
@@ -108,106 +108,6 @@ fn read_stdin() -> Result<String> {
         anyhow::bail!("Empty query received from stdin");
     }
     Ok(query)
-}
-
-fn reject_mutation_document_for_dry_run(query: &str, dry_run: bool) -> Result<()> {
-    if dry_run && contains_top_level_mutation_operation(query) {
-        anyhow::bail!(
-            "--dry-run is not supported for mutation documents passed to `api query`; use `api mutate` without --dry-run; no changes were made"
-        );
-    }
-    Ok(())
-}
-
-fn contains_top_level_mutation_operation(query: &str) -> bool {
-    let bytes = query.as_bytes();
-    let mut index = 0;
-    let mut brace_depth: usize = 0;
-    let mut paren_depth: usize = 0;
-    let mut bracket_depth: usize = 0;
-    let mut previous_top_level_name: Option<String> = None;
-
-    while index < bytes.len() {
-        match bytes[index] {
-            b'#' => {
-                while index < bytes.len() && bytes[index] != b'\n' {
-                    index += 1;
-                }
-            }
-            b'"' => {
-                if bytes[index..].starts_with(b"\"\"\"") {
-                    index += 3;
-                    while index < bytes.len() {
-                        if bytes[index..].starts_with(b"\"\"\"") {
-                            index += 3;
-                            break;
-                        }
-                        index += 1;
-                    }
-                } else {
-                    index += 1;
-                    while index < bytes.len() {
-                        match bytes[index] {
-                            b'\\' => index = (index + 2).min(bytes.len()),
-                            b'"' => {
-                                index += 1;
-                                break;
-                            }
-                            _ => index += 1,
-                        }
-                    }
-                }
-            }
-            b'{' => {
-                brace_depth += 1;
-                index += 1;
-            }
-            b'}' => {
-                brace_depth = brace_depth.saturating_sub(1);
-                index += 1;
-            }
-            b'(' => {
-                paren_depth += 1;
-                index += 1;
-            }
-            b')' => {
-                paren_depth = paren_depth.saturating_sub(1);
-                index += 1;
-            }
-            b'[' => {
-                bracket_depth += 1;
-                index += 1;
-            }
-            b']' => {
-                bracket_depth = bracket_depth.saturating_sub(1);
-                index += 1;
-            }
-            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
-                let start = index;
-                index += 1;
-                while index < bytes.len()
-                    && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
-                {
-                    index += 1;
-                }
-                if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
-                    let name = &query[start..index];
-                    if name == "mutation"
-                        && !matches!(
-                            previous_top_level_name.as_deref(),
-                            Some("query") | Some("subscription") | Some("fragment")
-                        )
-                    {
-                        return true;
-                    }
-                    previous_top_level_name = Some(name.to_string());
-                }
-            }
-            _ => index += 1,
-        }
-    }
-
-    false
 }
 
 fn read_query(input: &str) -> Result<String> {
@@ -321,45 +221,47 @@ async fn run_mutate(query_str: &str, variables: &[String], output: &OutputOption
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn dry_run_rejects_query_before_resolving_source() {
+        let output = OutputOptions {
+            format: crate::OutputFormat::Table,
+            json: crate::output::JsonOutputOptions::new(
+                false,
+                None,
+                None,
+                crate::output::SortOrder::Asc,
+                true,
+            ),
+            format_template: None,
+            filters: vec![],
+            fail_on_empty: false,
+            pagination: crate::pagination::PaginationOptions::default(),
+            cache: crate::cache::CacheOptions::default(),
+            dry_run: true,
+        };
+
+        let error = handle(
+            ApiCommands::Query {
+                query: None,
+                variables: vec![],
+                paginate: false,
+                nodes_path: String::new(),
+                page_info_path: String::new(),
+            },
+            &output,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("--dry-run is not supported for `api query`"));
+    }
+
     #[test]
     fn test_parse_variables_empty() {
         let result = parse_variables(&[]).unwrap();
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn dry_run_rejects_mutation_documents() {
-        let error = reject_mutation_document_for_dry_run(
-            "mutation CreateIssue { issueCreate(input: {}) { success } }",
-            true,
-        )
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("is not supported for mutation documents"));
-    }
-
-    #[test]
-    fn dry_run_accepts_query_documents() {
-        assert!(reject_mutation_document_for_dry_run("query { viewer { id } }", true).is_ok());
-        assert!(reject_mutation_document_for_dry_run("{ viewer { id } }", true).is_ok());
-    }
-
-    #[test]
-    fn mutation_word_in_query_text_is_not_an_operation() {
-        assert!(
-            reject_mutation_document_for_dry_run("query mutation { viewer { name } }", true)
-                .is_ok()
-        );
-        assert!(
-            reject_mutation_document_for_dry_run("query { viewer { name } } # mutation", true)
-                .is_ok()
-        );
-        assert!(reject_mutation_document_for_dry_run(
-            "query { viewer { name } note(text: \"mutation\") }",
-            true
-        )
-        .is_ok());
     }
 
     #[test]

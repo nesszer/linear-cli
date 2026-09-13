@@ -6,8 +6,8 @@ CircleCI is the canonical CI and release path. See
 ## Branch and pull-request CI
 
 The CircleCI `ci` workflow runs locked tests with `secure-storage`, formatting,
-clippy with warnings denied, and a default-feature build on Linux. It runs for
-non-release refs.
+clippy with warnings denied, a default-feature build, and release-target
+consistency checks on Linux. It runs for non-release refs.
 
 ## Tagged releases
 
@@ -23,9 +23,16 @@ The release verifier fails closed unless the tag matches `Cargo.toml`, all
 five archives are present, each archive contains only the expected root binary,
 the target formats match, and native binaries report the tagged version.
 Cross-target jobs carry an independently checked version proof from the tagged
-source. The GitHub release upload runs only after this gate. Crates.io
-publication is an explicit opt-in lane so a missing registry credential cannot
-turn an otherwise valid GitHub release into an opaque pre-start failure.
+source. The same locked test/format/clippy job runs on the tag before the build
+matrix. The GitHub release upload re-validates the artifacts and only adds
+missing assets; an unexpected or mismatched existing asset stops the job without
+an overwrite. Crates.io publication is an explicit opt-in lane so a missing
+registry credential cannot turn an otherwise valid GitHub release into an
+opaque pre-start failure.
+
+The repository-owned target matrix is `.circleci/release-targets.json`; CI
+checks that each CircleCI release build job uses the corresponding manifest
+target, while the verifier and release manifest consume the same file.
 
 ## Credentials and plan prerequisites
 

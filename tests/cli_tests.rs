@@ -1359,7 +1359,7 @@ fn test_dry_run_output() {
 
 #[test]
 fn test_unsupported_dry_run_fails_closed_before_auth() {
-    let cases: [&[&str]; 3] = [
+    let cases: [&[&str]; 5] = [
         &[
             "relations",
             "add",
@@ -1370,12 +1370,9 @@ fn test_unsupported_dry_run_fails_closed_before_auth() {
             "--dry-run",
         ],
         &["bulk", "assign", "me", "-i", "LIN-1", "--dry-run"],
-        &[
-            "api",
-            "query",
-            "mutation { issueCreate(input: {}) { success } }",
-            "--dry-run",
-        ],
+        &["api", "query", "{ viewer { id } }", "--dry-run"],
+        &["projects", "open", "project-id", "--dry-run"],
+        &["issues", "open", "LIN-1", "--dry-run"],
     ];
 
     for args in cases {

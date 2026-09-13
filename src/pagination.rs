@@ -161,7 +161,9 @@ pub enum PageFlow {
 
 /// Walk a connection forward, letting the caller stop as soon as it has enough.
 ///
-/// Same cursor rules as [`paginate_nodes`], but each page is handed to
+/// This is the forward-only streaming counterpart to [`paginate_nodes`]. An
+/// `after` cursor is supported, while `before` is rejected because the
+/// short-circuit callback has no reverse-order contract. Each page is handed to
 /// `accumulate` before the next request goes out and `accumulate` owns whatever
 /// it collects. A caller scanning an unfilterable feed for a known set of
 /// records therefore pays for the pages it actually needs rather than
@@ -200,6 +202,12 @@ pub async fn paginate_until<F>(
 where
     F: FnMut(Vec<Value>) -> PageFlow,
 {
+    if options.before.is_some() {
+        anyhow::bail!(
+            "paginate_until supports forward cursor traversal only; use paginate_nodes for before"
+        );
+    }
+
     let limit = if options.all { None } else { options.limit };
     let page_size = options.effective_page_size(default_page_size);
     let mut after = options.after.clone();
@@ -254,22 +262,31 @@ where
         let Some(page_info) = get_path(&result, page_info_path).and_then(|v| v.as_object()) else {
             break;
         };
-        if !page_info
-            .get("hasNextPage")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            break;
-        }
-        // A connection that claims another page without handing back a cursor
-        // would otherwise reread the first page until the limit ran out.
-        let Some(cursor) = page_info.get("endCursor").and_then(|v| v.as_str()) else {
+        let Some(cursor) = next_forward_cursor(page_info, after.as_deref()) else {
             break;
         };
         after = Some(cursor.to_string());
     }
 
     Ok(())
+}
+
+fn next_forward_cursor<'a>(
+    page_info: &'a Map<String, Value>,
+    current: Option<&str>,
+) -> Option<&'a str> {
+    if !page_info
+        .get("hasNextPage")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let cursor = page_info
+        .get("endCursor")
+        .and_then(|value| value.as_str())?;
+    (current != Some(cursor)).then_some(cursor)
 }
 
 /// Stream paginated results, calling a handler for each batch of nodes.
@@ -528,5 +545,68 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(opts.effective_page_size(100), 1);
+    }
+
+    #[test]
+    fn forward_cursor_stops_when_no_next_page_exists() {
+        let page_info = serde_json::from_value::<Value>(serde_json::json!({
+            "hasNextPage": false,
+            "endCursor": "cursor-1"
+        }))
+        .unwrap();
+        assert_eq!(
+            next_forward_cursor(page_info.as_object().unwrap(), None),
+            None
+        );
+    }
+
+    #[test]
+    fn forward_cursor_stops_when_cursor_does_not_progress() {
+        let page_info = serde_json::from_value::<Value>(serde_json::json!({
+            "hasNextPage": true,
+            "endCursor": "cursor-1"
+        }))
+        .unwrap();
+        assert_eq!(
+            next_forward_cursor(page_info.as_object().unwrap(), Some("cursor-1")),
+            None
+        );
+    }
+
+    #[test]
+    fn forward_cursor_returns_next_cursor() {
+        let page_info = serde_json::from_value::<Value>(serde_json::json!({
+            "hasNextPage": true,
+            "endCursor": "cursor-2"
+        }))
+        .unwrap();
+        assert_eq!(
+            next_forward_cursor(page_info.as_object().unwrap(), Some("cursor-1")),
+            Some("cursor-2")
+        );
+    }
+
+    #[tokio::test]
+    async fn paginate_until_rejects_backward_cursor() {
+        let client = LinearClient::with_api_key("test-key".to_string()).unwrap();
+        let options = PaginationOptions {
+            before: Some("cursor-1".to_string()),
+            ..Default::default()
+        };
+
+        let error = paginate_until(
+            &client,
+            "query { viewer { id } }",
+            Map::new(),
+            &["data", "items", "nodes"],
+            &["data", "items", "pageInfo"],
+            &options,
+            50,
+            |_| PageFlow::Stop,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("forward cursor traversal only"));
     }
 }

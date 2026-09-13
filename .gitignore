@@ -2,6 +2,7 @@
 ._*
 .DS_Store
 .clawpatch/
+.circleci/__pycache__/
 
 # Claude Code local settings (not skills)
 .claude/settings.local.json

@@ -5,7 +5,9 @@ CircleCI is the canonical CI and release path for this repository.
 ## CI
 
 The `ci` workflow runs the locked test suite, formatting check, clippy with
-warnings denied, and a default-feature build on Linux for non-release refs.
+warnings denied, a default-feature build, and release-target consistency checks
+on Linux for non-release refs. Tagged releases run the same `test` job before
+the release build matrix.
 
 ## Release
 
@@ -17,13 +19,19 @@ Push an annotated or lightweight tag matching `vX.Y.Z`. The release workflow:
    - `x86_64-pc-windows-msvc`
    - `x86_64-apple-darwin`
    - `aarch64-apple-darwin`
-2. Verifies that the tag version matches `Cargo.toml`.
-3. Requires exactly those five archives, checks their archive roots and target
+2. Runs the locked test, format, and clippy gate.
+3. Verifies that the tag version matches `Cargo.toml`.
+4. Requires exactly those five archives, checks their archive roots and target
    formats, verifies native Linux/Windows binaries with `--version`, and
    generates `SHA256SUMS` plus `release-manifest.json`.
-4. Uploads the verified assets to the GitHub release.
-5. Optionally publishes the matching crate version to crates.io when the
+5. Re-validates the workspace and uploads only missing, digest-matching assets
+   to the GitHub release; existing mismatches or unexpected assets fail closed.
+6. Optionally publishes the matching crate version to crates.io when the
    pipeline is explicitly triggered with `publish_crate=true`.
+
+The five-target matrix is owned by `.circleci/release-targets.json`. The
+checked-in CircleCI build jobs are validated against that manifest by
+`.circleci/release_targets.py`.
 
 The GitHub release step is downstream of the five-asset gate and uses the
 existing CircleCI context `gh-release-publisher` containing:

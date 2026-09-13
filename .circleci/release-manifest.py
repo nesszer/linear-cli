@@ -6,27 +6,7 @@ import json
 import pathlib
 import sys
 
-
-EXPECTED_ARCHIVES = sorted(
-    [
-        "linear-cli-x86_64-unknown-linux-gnu.tar.gz",
-        "linear-cli-aarch64-unknown-linux-gnu.tar.gz",
-        "linear-cli-x86_64-pc-windows-msvc.zip",
-        "linear-cli-x86_64-apple-darwin.tar.gz",
-        "linear-cli-aarch64-apple-darwin.tar.gz",
-    ]
-)
-
-
-def target_for(name: str) -> str:
-    prefix = "linear-cli-"
-    if name.endswith(".tar.gz"):
-        suffix = ".tar.gz"
-    elif name.endswith(".zip"):
-        suffix = ".zip"
-    else:
-        raise ValueError(f"unsupported archive: {name}")
-    return name[len(prefix) : -len(suffix)]
+from release_targets import load_targets, matrix_sha256
 
 
 def main() -> int:
@@ -35,23 +15,28 @@ def main() -> int:
 
     version = sys.argv[1]
     release_dir = pathlib.Path("release")
+    targets = load_targets()
+    expected_archives = sorted(target["archive"] for target in targets)
     archives = sorted(
         path.name
         for path in release_dir.iterdir()
         if path.is_file() and (path.name.endswith(".tar.gz") or path.name.endswith(".zip"))
     )
-    if archives != EXPECTED_ARCHIVES:
+    if archives != expected_archives:
         raise SystemExit(f"release archives do not match expected set: {archives!r}")
 
+    targets_by_archive = {target["archive"]: target for target in targets}
     manifest = {
         "version": version,
+        "target_matrix_sha256": matrix_sha256(),
         "archives": [
             {
-                "target": target_for(name),
+                "target": targets_by_archive[name]["target"],
                 "file": name,
+                "size": (release_dir / name).stat().st_size,
                 "sha256": hashlib.sha256((release_dir / name).read_bytes()).hexdigest(),
             }
-            for name in EXPECTED_ARCHIVES
+            for name in expected_archives
         ],
     }
     (release_dir / "release-manifest.json").write_text(
